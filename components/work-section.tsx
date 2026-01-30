@@ -9,39 +9,39 @@ gsap.registerPlugin(ScrollTrigger)
 
 const experiments = [
   {
-    title: "Project Lattice",
-    medium: "Interface Study",
-    description: "Structural framework for adaptive layouts in dynamic content systems.",
+    title: "Sealed-Bid CCA",
+    medium: "Core Mechanism",
+    description: "Privacy-focused fork of Uniswap's CCA. Bids are confidential until auction close.",
     span: "col-span-2 row-span-2",
   },
   {
-    title: "Signal Field",
-    medium: "Agent Orchestration",
-    description: "Autonomous coordination layer for multi-agent environments.",
+    title: "Price Discovery",
+    medium: "Continuous Auction",
+    description: "Bids integrate over time to determine a fair market-clearing price onchain.",
     span: "col-span-1 row-span-1",
   },
   {
-    title: "Silent Agent",
-    medium: "Visual System",
-    description: "Non-intrusive interface patterns for ambient computing.",
+    title: "No MEV Leak",
+    medium: "Privacy Layer",
+    description: "Bots and MEV actors cannot see bid prices or identities before close.",
     span: "col-span-1 row-span-2",
   },
   {
-    title: "Noir Grid",
-    medium: "Typography",
-    description: "High-contrast typographic system for editorial interfaces.",
+    title: "Pool Seeding",
+    medium: "Liquidity",
+    description: "Auction outcome seeds a Uniswap pool. Permissionless, onchain.",
     span: "col-span-1 row-span-1",
   },
   {
-    title: "Echo Chamber",
-    medium: "Audio-Visual",
-    description: "Generative soundscapes mapped to interface interactions.",
+    title: "ZK / Confidential Compute",
+    medium: "Cryptography",
+    description: "Confidentiality via ZK proofs or confidential compute. Enforceable and fair.",
     span: "col-span-2 row-span-1",
   },
   {
-    title: "Void Protocol",
-    medium: "Experimental",
-    description: "Negative space as primary interaction medium.",
+    title: "Equitable Launches",
+    medium: "Fair Access",
+    description: "More equitable token launch experience for all participants.",
     span: "col-span-1 row-span-1",
   },
 ]
@@ -98,11 +98,11 @@ export function WorkSection() {
       {/* Section header */}
       <div ref={headerRef} className="mb-16 flex items-end justify-between">
         <div>
-          <span className="font-mono text-[10px] uppercase tracking-[0.3em] text-accent">02 / Experiments</span>
-          <h2 className="mt-4 font-[var(--font-bebas)] text-5xl md:text-7xl tracking-tight">SELECTED WORK</h2>
+          <span className="font-mono text-[10px] uppercase tracking-[0.3em] text-accent">02 / Mechanism</span>
+          <h2 className="mt-4 font-[var(--font-bebas)] text-5xl md:text-7xl tracking-tight">HOW IT WORKS</h2>
         </div>
         <p className="hidden md:block max-w-xs font-mono text-xs text-muted-foreground text-right leading-relaxed">
-          Studies across interface design, agent systems, and visual computation.
+          Sealed-bid CCA, liquidity bootstrapping, and privacy-first token launches onchain.
         </p>
       </div>
 

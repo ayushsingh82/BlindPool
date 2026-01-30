@@ -16,37 +16,37 @@ export function PrinciplesSection() {
     {
       number: "01",
       titleParts: [
-        { text: "INTERFACE", highlight: true },
-        { text: " MINIMALISM", highlight: false },
+        { text: "SEALED ", highlight: false },
+        { text: "BIDS", highlight: true },
       ],
-      description: "Reduce until only the essential remains. Every element earns its place.",
+      description: "Bids are private until the auction closes. No leakage to MEV or snipers.",
       align: "left",
     },
     {
       number: "02",
       titleParts: [
-        { text: "SYSTEMS", highlight: true },
-        { text: " OVER SCREENS", highlight: false },
+        { text: "FAIR ", highlight: false },
+        { text: "DISCOVERY", highlight: true },
       ],
-      description: "Design behaviors, not just layouts. Build logic that scales.",
+      description: "Continuous, onchain price discovery. Market-clearing outcome seeds liquidity.",
       align: "right",
     },
     {
       number: "03",
       titleParts: [
-        { text: "CONTROLLED ", highlight: false },
-        { text: "TENSION", highlight: true },
+        { text: "PRIVACY ", highlight: false },
+        { text: "BY DESIGN", highlight: true },
       ],
-      description: "Balance between restraint and expression. Confidence without excess.",
+      description: "ZK proofs or confidential compute. Cryptographic confidentiality, onchain enforceability.",
       align: "left",
     },
     {
       number: "04",
       titleParts: [
-        { text: "SIGNAL ", highlight: false },
-        { text: "CLARITY", highlight: true },
+        { text: "EQUITABLE ", highlight: false },
+        { text: "LAUNCHES", highlight: true },
       ],
-      description: "Communication that cuts through noise. Precision in every interaction.",
+      description: "More equitable token launch experience. Built on Uniswap's CCA, extended for privacy.",
       align: "right",
     },
   ]
@@ -94,7 +94,7 @@ export function PrinciplesSection() {
       {/* Section header */}
       <div ref={headerRef} className="mb-24">
         <span className="font-mono text-[10px] uppercase tracking-[0.3em] text-accent">03 / Principles</span>
-        <h2 className="mt-4 font-[var(--font-bebas)] text-5xl md:text-7xl tracking-tight">HOW WE WORK</h2>
+        <h2 className="mt-4 font-[var(--font-bebas)] text-5xl md:text-7xl tracking-tight">BLINDPOOL VALUES</h2>
       </div>
 
       {/* Staggered principles */}

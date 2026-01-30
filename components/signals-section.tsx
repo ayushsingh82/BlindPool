@@ -10,28 +10,28 @@ gsap.registerPlugin(ScrollTrigger)
 const signals = [
   {
     date: "2025.06.10",
-    title: "Signal Field",
-    note: "New interface paradigm for ambient computing environments.",
+    title: "Sealed Bids",
+    note: "Submit bids privately. No one sees your price or identity until the auction closes.",
   },
   {
     date: "2025.05.28",
-    title: "Silent Agent",
-    note: "Orchestration layer for autonomous design systems.",
+    title: "MEV Resistance",
+    note: "Eliminates pre-bid sniping and front-running. Strategic bid info stays confidential.",
   },
   {
     date: "2025.05.15",
-    title: "Noir Grid",
-    note: "Typographic system for editorial interfaces.",
+    title: "CCA Fork",
+    note: "Built on Uniswap's Continuous Clearing Auction for fair, continuous price discovery.",
   },
   {
     date: "2025.04.30",
-    title: "Project Lattice",
-    note: "Structural framework for adaptive layouts.",
+    title: "Liquidity Bootstrapping",
+    note: "Bids integrate over time; market-clearing price seeds a Uniswap pool at close.",
   },
   {
     date: "2025.04.12",
-    title: "Echo Chamber",
-    note: "Audio-visual synthesis in browser environments.",
+    title: "ZK / Confidential Compute",
+    note: "Privacy via zero-knowledge proofs or confidential compute. Onchain enforceability.",
   },
 ]
 
@@ -135,8 +135,8 @@ export function SignalsSection() {
 
       {/* Section header */}
       <div ref={headerRef} className="mb-16 pr-6 md:pr-12">
-        <span className="font-mono text-[10px] uppercase tracking-[0.3em] text-accent">01 / Signals</span>
-        <h2 className="mt-4 font-[var(--font-bebas)] text-5xl md:text-7xl tracking-tight">WHAT&apos;S NEW</h2>
+        <span className="font-mono text-[10px] uppercase tracking-[0.3em] text-accent">01 / Features</span>
+        <h2 className="mt-4 font-[var(--font-bebas)] text-5xl md:text-7xl tracking-tight">WHY BLINDPOOL</h2>
       </div>
 
       {/* Horizontal scroll container */}

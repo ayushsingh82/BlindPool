@@ -1,36 +1,44 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# BlindPool
+
+**Privacy-focused fork of Uniswap's Continuous Clearing Auction (CCA) with sealed-bid configuration.**
+
+## What It Is
+
+[Uniswap's Continuous Clearing Auction (CCA)](https://docs.uniswap.org/) is a mechanism for **fair, continuous price discovery** and **liquidity bootstrapping** for a new token — all onchain and permissionless. Bids are automatically integrated over time to determine a market-clearing price and seed liquidity into a Uniswap pool when the auction ends.
+
+**BlindPool** extends CCA by adding **sealed-bid / confidentiality features**: participants submit bids **privately**, so no one else (including bots or MEV actors) can see bid prices or identities before the auction closes. It resembles sealed-bid auctions in traditional finance, but built for onchain DeFi. Research in confidentiality on blockchains points toward **confidential compute** or **zero-knowledge (ZK)** techniques for this kind of privacy.
+
+## Why It Matters
+
+- **Reduces pre-bid sniping and front-running** — Bids stay hidden until the auction closes.
+- **Prevents leakage of strategic bid information** that can be exploited by MEV bots.
+- **Brings a more equitable token launch experience** — Fairer access for all participants.
+
+## Risks & Challenges
+
+- **Cryptographic privacy** — Must integrate ZK proofs and/or confidential compute.
+- **Onchain enforceability and fairness** — Confidentiality must be verifiable and enforceable onchain.
+
+## Tech Stack
+
+- **Next.js** — App framework
+- **Tailwind CSS** — Styling
+- **Uniswap CCA** — Base mechanism (forked and extended for privacy)
 
 ## Getting Started
 
-First, run the development server:
-
 ```bash
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
-
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
-
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Open [http://localhost:3000](http://localhost:3000) to view the BlindPool app.
 
 ## Learn More
 
-To learn more about Next.js, take a look at the following resources:
+- [Uniswap CCA Documentation](https://docs.uniswap.org/)
+- [Next.js Documentation](https://nextjs.org/docs)
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+---
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+© 2025 BlindPool. Privacy-first CCA. Sealed-bid token launches.
