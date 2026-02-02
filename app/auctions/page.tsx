@@ -52,9 +52,20 @@ export default async function AuctionsPage({
         <Suspense fallback={<div className="h-9 w-48 bg-muted/30 animate-pulse" />}>
           <AuctionStatusTabs />
         </Suspense>
-        <span className="font-mono text-[10px] uppercase tracking-widest text-muted-foreground">
-          {auctions.length} auction{auctions.length !== 1 ? "s" : ""}
-        </span>
+        <div className="flex items-center gap-4 flex-wrap">
+          <span className="font-mono text-[10px] uppercase tracking-widest text-muted-foreground">
+            {auctions.length} auction{auctions.length !== 1 ? "s" : ""}
+          </span>
+          <Link
+            href="/auctions/new"
+            className={cn(
+              "border border-foreground/20 px-4 py-2 font-mono text-xs uppercase tracking-widest",
+              "hover:border-accent hover:text-accent transition-all duration-200",
+            )}
+          >
+            Create auction
+          </Link>
+        </div>
       </div>
 
       {auctions.length === 0 ? (
