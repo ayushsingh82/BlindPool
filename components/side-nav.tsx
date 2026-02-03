@@ -5,7 +5,7 @@ import Link from "next/link"
 import { usePathname } from "next/navigation"
 import { cn } from "@/lib/utils"
 
-const navItems = [
+const navItems: ({ id: string; label: string } | { href: string; label: string })[] = [
   { id: "hero", label: "BlindPool" },
   { id: "signals", label: "Features" },
   { id: "work", label: "Mechanism" },
