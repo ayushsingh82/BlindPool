@@ -1,11 +1,15 @@
 import { getDefaultConfig } from "@rainbow-me/rainbowkit"
 import { sepolia } from "wagmi/chains"
+import { http } from "wagmi"
 
-const projectId = process.env.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID ?? "YOUR_PROJECT_ID"
+const projectId = "a73ceeb8d8079b8c1dc4d9d5ebbc0433"
 
 export const wagmiConfig = getDefaultConfig({
   appName: "BlindPool",
   projectId,
   chains: [sepolia],
+  transports: {
+    [sepolia.id]: http(),
+  },
   ssr: true,
 })

@@ -3,10 +3,12 @@
 import { useState } from "react"
 import { useRouter } from "next/navigation"
 import { cn } from "@/lib/utils"
-import { useAccount, useWriteContract, useWaitForTransactionReceipt } from "wagmi"
-import { parseEther, encodePacked, encodeAbiParameters, parseAbiParameters, type Address } from "viem"
+import { useAccount, useBlockNumber, useWriteContract, useWaitForTransactionReceipt } from "wagmi"
+import { parseEther, encodeAbiParameters, parseAbiParameters, encodePacked, type Address } from "viem"
+import { sepolia } from "wagmi/chains"
 
 const CCA_FACTORY = "0xcca1101C61cF5cb44C968947985300DF945C3565" as const
+const MOCK_TOKEN = "0xc4aAE767E65a18bF381c3159e58b899CA7f8561F" as const
 
 // Minimal Factory ABI for initializeDistribution
 const FACTORY_ABI = [
@@ -44,8 +46,27 @@ const Q96 = BigInt(2) ** BigInt(96)
 function ethToQ96(ethPrice: string): bigint {
   const price = parseFloat(ethPrice)
   if (!Number.isFinite(price) || price <= 0) return BigInt(0)
-  // floorPrice in Q96: price * 2^96
-  return BigInt(Math.floor(price * Number(Q96)))
+  // Use integer math to avoid JS float precision loss at large BigInt range
+  // price = numerator / denominator, e.g. 0.001 = 1/1000
+  // We scale: floor(price * 2^96) = floor(numerator * 2^96 / denominator)
+  const decimals = (ethPrice.split(".")[1] || "").length
+  const denominator = BigInt(10) ** BigInt(decimals)
+  const numerator = BigInt(Math.round(price * Number(denominator)))
+  return (numerator * Q96) / denominator
+}
+
+// Build auctionStepsData: 100% linear release over the auction duration
+// Format: bytes8 = uint24(mps) in high 3 bytes | uint40(blockDelta) in low 5 bytes
+// Total MPS must equal 1e7 (100% = 10,000,000)
+function buildAuctionSteps(durationBlocks: number): `0x${string}` {
+  const TOTAL_MPS = BigInt(10_000_000)
+  const mps = TOTAL_MPS / BigInt(durationBlocks) // MPS per block
+  const blockDelta = BigInt(durationBlocks)
+  // Pack: mps in high 24 bits, blockDelta in low 40 bits → bytes8
+  const step = (mps << BigInt(40)) | blockDelta
+  // Encode as 8 bytes
+  const hex = step.toString(16).padStart(16, "0")
+  return `0x${hex}`
 }
 
 function isValidAddress(addr: string): addr is Address {
@@ -55,13 +76,14 @@ function isValidAddress(addr: string): addr is Address {
 export function CreateAuctionForm() {
   const router = useRouter()
   const { address, isConnected } = useAccount()
+  const { data: currentBlock } = useBlockNumber({ chainId: sepolia.id, watch: true })
 
   // Offchain metadata
   const [name, setName] = useState("")
   const [description, setDescription] = useState("")
 
   // Onchain params
-  const [tokenAddress, setTokenAddress] = useState("")
+  const [tokenAddress, setTokenAddress] = useState(MOCK_TOKEN as string)
   const [totalSupply, setTotalSupply] = useState("")
   const [reservePrice, setReservePrice] = useState("")
   const [duration, setDuration] = useState<string>("5m")
@@ -84,6 +106,10 @@ export function CreateAuctionForm() {
 
     if (!isConnected || !address) {
       setError("Connect your wallet first.")
+      return
+    }
+    if (!currentBlock) {
+      setError("Waiting for current block number — try again in a moment.")
       return
     }
     if (!name.trim()) {
@@ -115,20 +141,20 @@ export function CreateAuctionForm() {
       return
     }
 
-    // Calculate block range
+    // Calculate ABSOLUTE block numbers from current block
     const durationOpt = DURATION_OPTIONS.find((o) => o.value === duration)!
-    const startBlockOffset = 5 // start ~5 blocks from now
-    const endBlockOffset = startBlockOffset + durationOpt.blocks
+    const startBlock = currentBlock + BigInt(5) // ~1 min from now
+    const endBlock = startBlock + BigInt(durationOpt.blocks)
+    const claimBlock = endBlock
 
     const floorPrice = ethToQ96(reservePrice)
-    // tickSpacing: use 1% of floor price as a reasonable default
-    const tickSpacing = floorPrice / BigInt(100) || BigInt(1)
+    // tickSpacing = floorPrice (matches deploy script pattern)
+    const tickSpacing = floorPrice
+
+    // Build auction steps: 100% linear release over the duration
+    const auctionStepsData = buildAuctionSteps(durationOpt.blocks)
 
     // Build AuctionParameters struct and encode as configData
-    // Struct: (address currency, address tokensRecipient, address fundsRecipient,
-    //          uint64 startBlock, uint64 endBlock, uint64 claimBlock,
-    //          uint256 tickSpacing, address validationHook, uint256 floorPrice,
-    //          uint128 requiredCurrencyRaised, bytes auctionStepsData)
     const configData = encodeAbiParameters(
       parseAbiParameters(
         "address currency, address tokensRecipient, address fundsRecipient, uint64 startBlock, uint64 endBlock, uint64 claimBlock, uint256 tickSpacing, address validationHook, uint256 floorPrice, uint128 requiredCurrencyRaised, bytes auctionStepsData"
@@ -137,18 +163,29 @@ export function CreateAuctionForm() {
         "0x0000000000000000000000000000000000000000", // currency = ETH
         tokensRecip,
         fundsRecip,
-        BigInt(startBlockOffset),  // relative — contract adds current block
-        BigInt(endBlockOffset),
-        BigInt(endBlockOffset),    // claimBlock = endBlock
+        startBlock,
+        endBlock,
+        claimBlock,
         tickSpacing,
         "0x0000000000000000000000000000000000000000", // no validation hook
         floorPrice,
-        BigInt(0),                 // no minimum raise
-        "0x",                      // empty auctionStepsData
+        BigInt(0), // no minimum raise
+        auctionStepsData,
       ]
     )
 
     const amount = parseEther(totalSupply)
+
+    console.log("CCA initializeDistribution params:", {
+      token: tokenAddress,
+      amount: amount.toString(),
+      startBlock: startBlock.toString(),
+      endBlock: endBlock.toString(),
+      floorPrice: floorPrice.toString(),
+      tickSpacing: tickSpacing.toString(),
+      currentBlock: currentBlock.toString(),
+      auctionStepsData,
+    })
 
     writeContract({
       address: CCA_FACTORY,
@@ -184,6 +221,13 @@ export function CreateAuctionForm() {
             Next: mint tokens to the auction address and call onTokensReceived().
           </span>
         </div>
+      )}
+
+      {/* Current block indicator */}
+      {currentBlock && (
+        <p className="font-mono text-[10px] text-muted-foreground/60">
+          Current Sepolia block: {currentBlock.toString()}
+        </p>
       )}
 
       {/* Offchain metadata */}
@@ -354,20 +398,22 @@ export function CreateAuctionForm() {
       <div className="flex items-center gap-6 pt-4">
         <button
           type="submit"
-          disabled={submitted || !name.trim() || !isConnected}
+          disabled={submitted || !name.trim() || !isConnected || !currentBlock}
           aria-busy={isWriting || isConfirming}
           className={cn(
             "border border-foreground/20 px-6 py-3 font-mono text-xs uppercase tracking-widest",
             "hover:border-accent hover:text-accent transition-all duration-200 disabled:opacity-50 disabled:pointer-events-none",
           )}
         >
-          {isWriting
-            ? "Confirm in wallet…"
-            : isConfirming
-              ? "Confirming…"
-              : isSuccess
-                ? "Created"
-                : "Create auction"}
+          {!currentBlock
+            ? "Loading block…"
+            : isWriting
+              ? "Confirm in wallet…"
+              : isConfirming
+                ? "Confirming…"
+                : isSuccess
+                  ? "Created"
+                  : "Create auction"}
         </button>
         <button
           type="button"
