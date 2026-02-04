@@ -1,3 +1,4 @@
+
 # CCA (Continuous Clearing Auction) Setup — ETH Sepolia
 
 Quick reference for **where to init the auction**, **whether your form is correct**, **which contract to use for bidding**, and **what is already deployed**. No Zama/decryption here — plain CCA only.

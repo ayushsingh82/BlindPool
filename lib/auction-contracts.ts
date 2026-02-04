@@ -50,7 +50,7 @@ export const FACTORY_ABI = [
   },
 ] as const
 
-// Auction contract ABI — view functions we need
+// Auction contract ABI — view + write functions
 export const AUCTION_ABI = [
   { type: "function", name: "token", inputs: [], outputs: [{ type: "address" }], stateMutability: "view" },
   { type: "function", name: "startBlock", inputs: [], outputs: [{ type: "uint64" }], stateMutability: "view" },
@@ -60,4 +60,79 @@ export const AUCTION_ABI = [
   { type: "function", name: "nextBidId", inputs: [], outputs: [{ type: "uint256" }], stateMutability: "view" },
   { type: "function", name: "currencyRaised", inputs: [], outputs: [{ type: "uint256" }], stateMutability: "view" },
   { type: "function", name: "totalSupply", inputs: [], outputs: [{ type: "uint128" }], stateMutability: "view" },
+  // Write functions
+  {
+    type: "function",
+    name: "submitBid",
+    inputs: [
+      { name: "maxPrice", type: "uint256" },
+      { name: "amount", type: "uint128" },
+      { name: "owner", type: "address" },
+      { name: "hookData", type: "bytes" },
+    ],
+    outputs: [{ name: "bidId", type: "uint256" }],
+    stateMutability: "payable",
+  },
+  {
+    type: "function",
+    name: "onTokensReceived",
+    inputs: [],
+    outputs: [],
+    stateMutability: "nonpayable",
+  },
 ] as const
+
+// ERC20 ABI — mint and transfer for funding auctions
+export const ERC20_ABI = [
+  {
+    type: "function",
+    name: "mint",
+    inputs: [
+      { name: "to", type: "address" },
+      { name: "amount", type: "uint256" },
+    ],
+    outputs: [],
+    stateMutability: "nonpayable",
+  },
+  {
+    type: "function",
+    name: "transfer",
+    inputs: [
+      { name: "to", type: "address" },
+      { name: "amount", type: "uint256" },
+    ],
+    outputs: [{ name: "", type: "bool" }],
+    stateMutability: "nonpayable",
+  },
+  {
+    type: "function",
+    name: "balanceOf",
+    inputs: [{ name: "account", type: "address" }],
+    outputs: [{ name: "", type: "uint256" }],
+    stateMutability: "view",
+  },
+  {
+    type: "function",
+    name: "symbol",
+    inputs: [],
+    outputs: [{ name: "", type: "string" }],
+    stateMutability: "view",
+  },
+  {
+    type: "function",
+    name: "name",
+    inputs: [],
+    outputs: [{ name: "", type: "string" }],
+    stateMutability: "view",
+  },
+] as const
+
+/** Convert an ETH-denominated price string to Q96 fixed-point */
+export function ethToQ96(ethPrice: string): bigint {
+  const price = parseFloat(ethPrice)
+  if (!Number.isFinite(price) || price <= 0) return BigInt(0)
+  const decimals = (ethPrice.split(".")[1] || "").length
+  const denominator = BigInt(10) ** BigInt(decimals)
+  const numerator = BigInt(Math.round(price * Number(denominator)))
+  return (numerator * Q96) / denominator
+}

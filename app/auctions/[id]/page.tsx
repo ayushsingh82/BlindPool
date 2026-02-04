@@ -241,7 +241,7 @@ export default function AuctionDetailPage() {
             <p className="mt-2 font-mono text-xs text-muted-foreground">
               Your bid is confidential until the auction closes.
             </p>
-            <PlaceBidForm auctionId={auction.address} tokenSymbol="CCA" />
+            <PlaceBidForm auctionId={auction.address} tokenSymbol="CCA" floorPrice={auction.floorPrice} />
           </div>
         )}
 
