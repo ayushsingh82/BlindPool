@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useEffect, useState, useCallback, useRef } from "react"
 import Link from "next/link"
 import { usePublicClient, useBlockNumber } from "wagmi"
 import { sepolia } from "wagmi/chains"
@@ -16,14 +16,13 @@ import {
   type AuctionStatus,
 } from "@/lib/auction-contracts"
 
+const CACHE_TTL = 30_000 // 30 seconds
+
 function statusLabel(s: AuctionStatus) {
   switch (s) {
-    case "active":
-      return "Active"
-    case "upcoming":
-      return "Upcoming"
-    case "ended":
-      return "Ended"
+    case "active": return "Active"
+    case "upcoming": return "Upcoming"
+    case "ended": return "Ended"
   }
 }
 
@@ -35,59 +34,66 @@ function blocksToTime(blocks: bigint): string {
   return `${Math.round(seconds / 86400)}d`
 }
 
+function deriveStatus(startBlock: bigint, endBlock: bigint, currentBlock: bigint): AuctionStatus {
+  if (currentBlock >= endBlock) return "ended"
+  if (currentBlock >= startBlock) return "active"
+  return "upcoming"
+}
+
 export function AuctionList({ filter }: { filter?: AuctionStatus }) {
   const publicClient = usePublicClient({ chainId: sepolia.id })
+  // Block number ONLY for countdown display — not used in any effect deps
   const { data: currentBlock } = useBlockNumber({ chainId: sepolia.id, watch: true })
+
   const [auctions, setAuctions] = useState<OnchainAuction[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const lastFetchRef = useRef<number>(0)
+  const fetchingRef = useRef(false)
 
-  useEffect(() => {
-    if (!publicClient || !currentBlock) return
+  const fetchAuctions = useCallback(async (isBackground: boolean) => {
+    if (!publicClient || fetchingRef.current) return
+    fetchingRef.current = true
 
-    let cancelled = false
+    try {
+      // Only show loading spinner on initial fetch, not background refreshes
+      if (!isBackground) setLoading(true)
 
-    async function fetchAuctions() {
-      try {
-        setLoading(true)
+      const latestBlock = await publicClient.getBlockNumber()
 
-        // 1. Fetch AuctionCreated events from factory (paginate in 1000-block chunks)
-        const CHUNK = BigInt(1000)
-        const allLogs: { auction: Address; token: Address }[] = []
-        let from = FACTORY_DEPLOY_BLOCK
-        const client = publicClient!
-        while (from <= currentBlock!) {
-          const to = from + CHUNK - BigInt(1) > currentBlock! ? currentBlock! : from + CHUNK - BigInt(1)
-          const chunk = await client.getLogs({
-            address: CCA_FACTORY,
-            event: FACTORY_ABI[0],
-            fromBlock: from,
-            toBlock: to,
-          })
-          for (const log of chunk) {
-            if (log.args.auction && log.args.token) {
-              allLogs.push({ auction: log.args.auction, token: log.args.token })
-            }
+      // Fetch AuctionCreated events (paginate in 1000-block chunks)
+      const CHUNK = BigInt(1000)
+      const allLogs: { auction: Address; token: Address }[] = []
+      let from = FACTORY_DEPLOY_BLOCK
+
+      while (from <= latestBlock) {
+        const to = from + CHUNK - BigInt(1) > latestBlock ? latestBlock : from + CHUNK - BigInt(1)
+        const chunk = await publicClient.getLogs({
+          address: CCA_FACTORY,
+          event: FACTORY_ABI[0],
+          fromBlock: from,
+          toBlock: to,
+        })
+        for (const log of chunk) {
+          if (log.args.auction && log.args.token) {
+            allLogs.push({ auction: log.args.auction, token: log.args.token })
           }
-          from = to + BigInt(1)
         }
+        from = to + BigInt(1)
+      }
 
-        if (cancelled) return
-
-        // 2. For each auction, read its onchain state
-        const auctionPromises = allLogs.map(async (log) => {
-          const auctionAddr = log.auction
-          const tokenAddr = log.token
-
-          const results = await publicClient!.multicall({
+      // Read each auction's state
+      const all = await Promise.all(
+        allLogs.map(async (log) => {
+          const results = await publicClient.multicall({
             contracts: [
-              { address: auctionAddr, abi: AUCTION_ABI, functionName: "startBlock" },
-              { address: auctionAddr, abi: AUCTION_ABI, functionName: "endBlock" },
-              { address: auctionAddr, abi: AUCTION_ABI, functionName: "clearingPrice" },
-              { address: auctionAddr, abi: AUCTION_ABI, functionName: "floorPrice" },
-              { address: auctionAddr, abi: AUCTION_ABI, functionName: "nextBidId" },
-              { address: auctionAddr, abi: AUCTION_ABI, functionName: "currencyRaised" },
-              { address: auctionAddr, abi: AUCTION_ABI, functionName: "totalSupply" },
+              { address: log.auction, abi: AUCTION_ABI, functionName: "startBlock" },
+              { address: log.auction, abi: AUCTION_ABI, functionName: "endBlock" },
+              { address: log.auction, abi: AUCTION_ABI, functionName: "clearingPrice" },
+              { address: log.auction, abi: AUCTION_ABI, functionName: "floorPrice" },
+              { address: log.auction, abi: AUCTION_ABI, functionName: "nextBidId" },
+              { address: log.auction, abi: AUCTION_ABI, functionName: "currencyRaised" },
+              { address: log.auction, abi: AUCTION_ABI, functionName: "totalSupply" },
             ],
           })
 
@@ -95,49 +101,64 @@ export function AuctionList({ filter }: { filter?: AuctionStatus }) {
           const endBlock = (results[1].result as bigint) ?? BigInt(0)
           const clearingPriceRaw = (results[2].result as bigint) ?? BigInt(0)
           const floorPriceRaw = (results[3].result as bigint) ?? BigInt(0)
-          const nextBidId = (results[4].result as bigint) ?? BigInt(0)
-          const currencyRaisedRaw = (results[5].result as bigint) ?? BigInt(0)
-          const totalSupplyRaw = (results[6].result as bigint) ?? BigInt(0)
-
-          let status: AuctionStatus = "upcoming"
-          if (currentBlock! >= endBlock) {
-            status = "ended"
-          } else if (currentBlock! >= startBlock) {
-            status = "active"
-          }
 
           return {
-            address: auctionAddr,
-            token: tokenAddr,
+            address: log.auction,
+            token: log.token,
             startBlock,
             endBlock,
             clearingPrice: q96ToEth(clearingPriceRaw),
             clearingPriceRaw,
             floorPrice: q96ToEth(floorPriceRaw),
-            bidCount: Number(nextBidId),
-            currencyRaised: formatEther(currencyRaisedRaw),
-            totalSupply: formatEther(totalSupplyRaw),
-            status,
+            floorPriceRaw,
+            bidCount: Number((results[4].result as bigint) ?? BigInt(0)),
+            currencyRaised: formatEther((results[5].result as bigint) ?? BigInt(0)),
+            totalSupply: formatEther((results[6].result as bigint) ?? BigInt(0)),
+            status: deriveStatus(startBlock, endBlock, latestBlock),
           } satisfies OnchainAuction
         })
+      )
 
-        const all = await Promise.all(auctionPromises)
-        if (cancelled) return
-
-        setAuctions(all)
-        setError(null)
-      } catch (err: any) {
-        if (!cancelled) setError(err.message ?? "Failed to fetch auctions")
-      } finally {
-        if (!cancelled) setLoading(false)
+      setAuctions(all)
+      setError(null)
+      lastFetchRef.current = Date.now()
+    } catch (err: unknown) {
+      // Only show error if no cached data
+      if (auctions.length === 0) {
+        setError(err instanceof Error ? err.message : "Failed to fetch auctions")
       }
+    } finally {
+      setLoading(false)
+      fetchingRef.current = false
     }
+  }, [publicClient]) // eslint-disable-line react-hooks/exhaustive-deps
 
-    fetchAuctions()
-    return () => { cancelled = true }
-  }, [publicClient, currentBlock])
+  // Initial fetch
+  useEffect(() => {
+    if (!publicClient) return
+    fetchAuctions(false)
+  }, [publicClient, fetchAuctions])
 
-  const filtered = filter ? auctions.filter((a) => a.status === filter) : auctions
+  // Background refresh every 30 seconds
+  useEffect(() => {
+    if (!publicClient) return
+    const interval = setInterval(() => {
+      if (Date.now() - lastFetchRef.current >= CACHE_TTL) {
+        fetchAuctions(true)
+      }
+    }, CACHE_TTL)
+    return () => clearInterval(interval)
+  }, [publicClient, fetchAuctions])
+
+  // Recompute statuses from currentBlock without refetching
+  const auctionsWithLiveStatus = auctions.map((a) => ({
+    ...a,
+    status: currentBlock ? deriveStatus(a.startBlock, a.endBlock, currentBlock) : a.status,
+  }))
+
+  const filtered = filter
+    ? auctionsWithLiveStatus.filter((a) => a.status === filter)
+    : auctionsWithLiveStatus
 
   if (loading) {
     return (
@@ -166,10 +187,7 @@ export function AuctionList({ filter }: { filter?: AuctionStatus }) {
             : "No auctions found on Sepolia."}
         </p>
         {filter && (
-          <Link
-            href="/auctions"
-            className="mt-4 inline-block font-mono text-xs uppercase tracking-widest text-accent hover:underline"
-          >
+          <Link href="/auctions" className="mt-4 inline-block font-mono text-xs uppercase tracking-widest text-accent hover:underline">
             View all
           </Link>
         )}
@@ -195,40 +213,27 @@ export function AuctionList({ filter }: { filter?: AuctionStatus }) {
               <div className="flex flex-wrap items-start justify-between gap-4">
                 <div>
                   <div className="flex items-center gap-3">
-                    <span className="font-[var(--font-bebas)] text-2xl md:text-4xl tracking-tight">
-                      CCA
-                    </span>
-                    <span
-                      className={cn(
-                        "font-mono text-[10px] uppercase tracking-widest px-2 py-1 border",
-                        auction.status === "active" && "border-accent/60 text-accent",
-                        auction.status === "upcoming" && "border-muted-foreground/40 text-muted-foreground",
-                        auction.status === "ended" && "border-muted-foreground/40 text-muted-foreground",
-                      )}
-                    >
+                    <span className="font-[var(--font-bebas)] text-2xl md:text-4xl tracking-tight">CCA</span>
+                    <span className={cn(
+                      "font-mono text-[10px] uppercase tracking-widest px-2 py-1 border",
+                      auction.status === "active" && "border-accent/60 text-accent",
+                      auction.status !== "active" && "border-muted-foreground/40 text-muted-foreground",
+                    )}>
                       {statusLabel(auction.status)}
                     </span>
                   </div>
-                  <p className="mt-2 font-mono text-xs text-muted-foreground break-all">
-                    {auction.address}
-                  </p>
+                  <p className="mt-2 font-mono text-xs text-muted-foreground break-all">{auction.address}</p>
                   <p className="mt-1 font-mono text-[10px] text-muted-foreground/60">
-                    Token: {auction.token.slice(0, 6)}…{auction.token.slice(-4)} · Sepolia
+                    Token: {auction.token.slice(0, 6)}...{auction.token.slice(-4)} · Sepolia
                   </p>
                 </div>
                 <div className="flex flex-wrap gap-6 md:gap-10 font-mono text-xs text-muted-foreground">
                   <div>
-                    <span className="block text-[10px] uppercase tracking-widest text-muted-foreground/70">
-                      Clearing price
-                    </span>
-                    <span className="text-foreground">
-                      {auction.clearingPrice} ETH
-                    </span>
+                    <span className="block text-[10px] uppercase tracking-widest text-muted-foreground/70">Clearing price</span>
+                    <span className="text-foreground">{auction.clearingPrice} ETH</span>
                   </div>
                   <div>
-                    <span className="block text-[10px] uppercase tracking-widest text-muted-foreground/70">
-                      Bids
-                    </span>
+                    <span className="block text-[10px] uppercase tracking-widest text-muted-foreground/70">Bids</span>
                     <span className="text-foreground">{auction.bidCount}</span>
                   </div>
                   <div>
@@ -244,12 +249,8 @@ export function AuctionList({ filter }: { filter?: AuctionStatus }) {
                     </span>
                   </div>
                   <div>
-                    <span className="block text-[10px] uppercase tracking-widest text-muted-foreground/70">
-                      Raised
-                    </span>
-                    <span className="text-foreground">
-                      {parseFloat(auction.currencyRaised).toFixed(4)} ETH
-                    </span>
+                    <span className="block text-[10px] uppercase tracking-widest text-muted-foreground/70">Raised</span>
+                    <span className="text-foreground">{parseFloat(auction.currencyRaised).toFixed(4)} ETH</span>
                   </div>
                 </div>
               </div>

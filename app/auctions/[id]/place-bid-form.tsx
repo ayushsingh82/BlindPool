@@ -16,10 +16,16 @@ export function PlaceBidForm({
   auctionId,
   tokenSymbol,
   floorPrice,
+  floorPriceRaw,
+  clearingPrice,
+  clearingPriceRaw,
 }: {
   auctionId: string
   tokenSymbol: string
   floorPrice?: string
+  floorPriceRaw: bigint
+  clearingPrice?: string
+  clearingPriceRaw: bigint
 }) {
   const { address, isConnected } = useAccount()
   const [amount, setAmount] = useState("")
@@ -32,9 +38,7 @@ export function PlaceBidForm({
     hash: txHash,
   })
 
-  // Surface contract/tx errors to the user
   const hookError = writeError || receiptError
-
   const submitted = isWriting || (isConfirming && !hookError)
 
   function handleSubmit(e: React.FormEvent) {
@@ -67,6 +71,18 @@ export function PlaceBidForm({
       return
     }
 
+    // Must be strictly above clearing price
+    if (clearingPriceRaw > BigInt(0) && maxPriceQ96 <= clearingPriceRaw) {
+      setError(`Max price must be strictly above the clearing price (${clearingPrice} ETH).`)
+      return
+    }
+
+    // Must be at or above floor price
+    if (floorPriceRaw > BigInt(0) && maxPriceQ96 < floorPriceRaw) {
+      setError(`Max price must be at or above the floor price (${floorPrice} ETH).`)
+      return
+    }
+
     console.log("submitBid params:", {
       auction: auctionId,
       maxPrice: maxPriceQ96.toString(),
@@ -74,6 +90,8 @@ export function PlaceBidForm({
       owner: address,
     })
 
+    // 4-arg submitBid: maxPrice, amount, owner, hookData
+    // Contract uses floor price as prevTick automatically
     writeContract({
       address: auctionId as Address,
       abi: AUCTION_ABI,
@@ -106,10 +124,10 @@ export function PlaceBidForm({
           role="status"
           className="border border-accent/50 bg-accent/10 px-4 py-3 font-mono text-sm text-accent"
         >
-          Bid placed successfully! Tx: {txHash?.slice(0, 10)}...
+          Bid placed! Tx: {txHash?.slice(0, 10)}...
           <br />
           <span className="text-[10px] text-muted-foreground">
-            Your bid is now onchain. You will receive {tokenSymbol} at the clearing price when the auction ends.
+            You will receive {tokenSymbol} at the clearing price when the auction ends.
           </span>
           <div className="mt-3">
             <button
@@ -118,6 +136,7 @@ export function PlaceBidForm({
                 resetWrite()
                 setAmount("")
                 setMaxPrice("")
+                setError(null)
               }}
               className="border border-accent/40 px-3 py-1 font-mono text-[10px] uppercase tracking-widest hover:bg-accent/20 transition-colors"
             >
@@ -127,6 +146,14 @@ export function PlaceBidForm({
         </div>
       )}
 
+      {/* Current prices */}
+      <div className="font-mono text-[10px] text-muted-foreground/70 space-y-1">
+        {floorPrice && <p>Floor price: <span className="text-foreground">{floorPrice} ETH</span></p>}
+        {clearingPrice && clearingPrice !== "0" && (
+          <p>Clearing price: <span className="text-foreground">{clearingPrice} ETH</span> — bid must be <strong>above</strong> this</p>
+        )}
+      </div>
+
       <div>
         <label htmlFor="maxPrice" className={labelClass}>
           Max price (ETH per token)
@@ -135,7 +162,7 @@ export function PlaceBidForm({
           id="maxPrice"
           type="text"
           inputMode="decimal"
-          placeholder={floorPrice ? `e.g. ${floorPrice} or higher` : "0.001"}
+          placeholder={floorPrice ? `above ${floorPrice}` : "0.001"}
           value={maxPrice}
           onChange={(e) => setMaxPrice(e.target.value)}
           className={inputClass}
@@ -143,8 +170,7 @@ export function PlaceBidForm({
           required
         />
         <p className="mt-1 font-mono text-[10px] text-muted-foreground/60">
-          Maximum price you are willing to pay per token (encoded as Q96 onchain).
-          {floorPrice && <> Floor: {floorPrice} ETH.</>}
+          Must be strictly above the current clearing price (Q96 encoded onchain).
         </p>
       </div>
 
@@ -190,7 +216,7 @@ export function PlaceBidForm({
 
       <div className="mt-4 font-mono text-[10px] text-muted-foreground/70 border border-border/40 px-3 py-2 space-y-1">
         <p>
-          Calls <code>submitBid(maxPrice, amount, owner, hookData)</code> on the auction contract
+          Calls <code>submitBid(maxPrice, amount, owner, hookData)</code> on the auction
           with <code>msg.value = amount</code>.
         </p>
         <p>

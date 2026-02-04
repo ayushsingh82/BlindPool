@@ -30,6 +30,7 @@ export interface OnchainAuction {
   clearingPrice: string
   clearingPriceRaw: bigint
   floorPrice: string
+  floorPriceRaw: bigint
   bidCount: number
   currencyRaised: string
   totalSupply: string
@@ -60,7 +61,7 @@ export const AUCTION_ABI = [
   { type: "function", name: "nextBidId", inputs: [], outputs: [{ type: "uint256" }], stateMutability: "view" },
   { type: "function", name: "currencyRaised", inputs: [], outputs: [{ type: "uint256" }], stateMutability: "view" },
   { type: "function", name: "totalSupply", inputs: [], outputs: [{ type: "uint128" }], stateMutability: "view" },
-  // Write functions
+  // Write: 4-arg submitBid (uses floor as prevTick automatically)
   {
     type: "function",
     name: "submitBid",
