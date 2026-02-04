@@ -2,7 +2,7 @@
 
 import { useRouter, useSearchParams } from "next/navigation"
 import { cn } from "@/lib/utils"
-import type { AuctionStatus } from "@/lib/mock-auctions"
+import type { AuctionStatus } from "@/lib/auction-contracts"
 
 const TABS: { value: "all" | AuctionStatus; label: string }[] = [
   { value: "all", label: "All" },

@@ -92,13 +92,13 @@ export function CreateAuctionForm() {
 
   const [error, setError] = useState<string | null>(null)
 
-  const { data: txHash, writeContract, isPending: isWriting } = useWriteContract()
+  const { data: txHash, writeContract, isPending: isWriting, reset: resetWrite } = useWriteContract()
 
   const { isLoading: isConfirming, isSuccess } = useWaitForTransactionReceipt({
     hash: txHash,
   })
 
-  const submitted = isWriting || isConfirming || isSuccess
+  const submitted = isWriting || isConfirming
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
@@ -176,6 +176,11 @@ export function CreateAuctionForm() {
 
     const amount = parseEther(totalSupply)
 
+    // Random salt so each auction gets a unique CREATE2 address
+    const saltBytes = new Uint8Array(32)
+    crypto.getRandomValues(saltBytes)
+    const salt = `0x${Array.from(saltBytes).map((b) => b.toString(16).padStart(2, "0")).join("")}` as `0x${string}`
+
     console.log("CCA initializeDistribution params:", {
       token: tokenAddress,
       amount: amount.toString(),
@@ -185,6 +190,7 @@ export function CreateAuctionForm() {
       tickSpacing: tickSpacing.toString(),
       currentBlock: currentBlock.toString(),
       auctionStepsData,
+      salt,
     })
 
     writeContract({
@@ -195,7 +201,7 @@ export function CreateAuctionForm() {
         tokenAddress as Address,
         amount,
         configData,
-        "0x0000000000000000000000000000000000000000000000000000000000000000",
+        salt,
       ],
     })
   }
@@ -220,6 +226,22 @@ export function CreateAuctionForm() {
           <span className="text-[10px] text-muted-foreground">
             Next: mint tokens to the auction address and call onTokensReceived().
           </span>
+          <div className="mt-3 flex gap-4">
+            <button
+              type="button"
+              onClick={() => router.push("/auctions")}
+              className="border border-accent/40 px-3 py-1 font-mono text-[10px] uppercase tracking-widest hover:bg-accent/20 transition-colors"
+            >
+              View auctions
+            </button>
+            <button
+              type="button"
+              onClick={() => resetWrite()}
+              className="border border-border/40 px-3 py-1 font-mono text-[10px] uppercase tracking-widest text-muted-foreground hover:text-foreground transition-colors"
+            >
+              Create another
+            </button>
+          </div>
         </div>
       )}
 
