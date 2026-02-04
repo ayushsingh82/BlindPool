@@ -61,7 +61,8 @@ export const AUCTION_ABI = [
   { type: "function", name: "nextBidId", inputs: [], outputs: [{ type: "uint256" }], stateMutability: "view" },
   { type: "function", name: "currencyRaised", inputs: [], outputs: [{ type: "uint256" }], stateMutability: "view" },
   { type: "function", name: "totalSupply", inputs: [], outputs: [{ type: "uint128" }], stateMutability: "view" },
-  // Write: 4-arg submitBid (uses floor as prevTick automatically)
+  { type: "function", name: "tickSpacing", inputs: [], outputs: [{ type: "uint256" }], stateMutability: "view" },
+  // Write: 5-arg submitBid with prevTickPrice hint (avoids gas-heavy tick iteration)
   {
     type: "function",
     name: "submitBid",
@@ -69,6 +70,7 @@ export const AUCTION_ABI = [
       { name: "maxPrice", type: "uint256" },
       { name: "amount", type: "uint128" },
       { name: "owner", type: "address" },
+      { name: "prevTickPrice", type: "uint256" },
       { name: "hookData", type: "bytes" },
     ],
     outputs: [{ name: "bidId", type: "uint256" }],
@@ -136,4 +138,15 @@ export function ethToQ96(ethPrice: string): bigint {
   const denominator = BigInt(10) ** BigInt(decimals)
   const numerator = BigInt(Math.round(price * Number(denominator)))
   return (numerator * Q96) / denominator
+}
+
+/** Snap a Q96 price UP to the nearest valid tick boundary */
+export function snapToTickBoundary(priceQ96: bigint, tickSpacing: bigint): bigint {
+  const p = BigInt(priceQ96)
+  const ts = BigInt(tickSpacing)
+  if (ts <= BigInt(0)) return p
+  const remainder = p % ts
+  if (remainder === BigInt(0)) return p
+  // Round up to next tick boundary
+  return p - remainder + ts
 }

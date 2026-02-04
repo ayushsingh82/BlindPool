@@ -42,6 +42,7 @@ interface AuctionData {
   bidCount: number
   currencyRaised: string
   totalSupply: string
+  tickSpacing: bigint
 }
 
 export default function AuctionDetailPage() {
@@ -70,6 +71,7 @@ export default function AuctionDetailPage() {
           { address: auctionAddress, abi: AUCTION_ABI, functionName: "nextBidId" },
           { address: auctionAddress, abi: AUCTION_ABI, functionName: "currencyRaised" },
           { address: auctionAddress, abi: AUCTION_ABI, functionName: "totalSupply" },
+          { address: auctionAddress, abi: AUCTION_ABI, functionName: "tickSpacing" },
         ],
       })
 
@@ -85,6 +87,7 @@ export default function AuctionDetailPage() {
         bidCount: Number((results[5].result as bigint) ?? BigInt(0)),
         currencyRaised: formatEther((results[6].result as bigint) ?? BigInt(0)),
         totalSupply: formatEther((results[7].result as bigint) ?? BigInt(0)),
+        tickSpacing: (results[8].result as bigint) ?? BigInt(0),
       })
       setFetchError(null)
     } catch (err: unknown) {
@@ -208,6 +211,8 @@ export default function AuctionDetailPage() {
               floorPriceRaw={auction.floorPriceRaw}
               clearingPrice={auction.clearingPrice}
               clearingPriceRaw={auction.clearingPriceRaw}
+              totalSupply={auction.totalSupply}
+              tickSpacing={auction.tickSpacing}
             />
           </div>
         )}

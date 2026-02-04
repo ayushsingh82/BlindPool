@@ -2,9 +2,10 @@
 
 import { useState } from "react"
 import { cn } from "@/lib/utils"
-import { useAccount, useWriteContract, useWaitForTransactionReceipt } from "wagmi"
+import { useAccount, usePublicClient, useWriteContract, useWaitForTransactionReceipt } from "wagmi"
+import { sepolia } from "wagmi/chains"
 import { parseEther, type Address } from "viem"
-import { AUCTION_ABI, ethToQ96 } from "@/lib/auction-contracts"
+import { AUCTION_ABI, ethToQ96, snapToTickBoundary } from "@/lib/auction-contracts"
 
 const inputClass = cn(
   "mt-2 w-full border border-border bg-input/50 px-4 py-3 font-mono text-sm",
@@ -19,6 +20,8 @@ export function PlaceBidForm({
   floorPriceRaw,
   clearingPrice,
   clearingPriceRaw,
+  totalSupply,
+  tickSpacing,
 }: {
   auctionId: string
   tokenSymbol: string
@@ -26,11 +29,15 @@ export function PlaceBidForm({
   floorPriceRaw: bigint
   clearingPrice?: string
   clearingPriceRaw: bigint
+  totalSupply?: string
+  tickSpacing: bigint
 }) {
   const { address, isConnected } = useAccount()
+  const publicClient = usePublicClient({ chainId: sepolia.id })
   const [amount, setAmount] = useState("")
   const [maxPrice, setMaxPrice] = useState("")
   const [error, setError] = useState<string | null>(null)
+  const [simulating, setSimulating] = useState(false)
 
   const { data: txHash, writeContract, isPending: isWriting, reset: resetWrite, error: writeError } = useWriteContract()
 
@@ -39,15 +46,23 @@ export function PlaceBidForm({
   })
 
   const hookError = writeError || receiptError
-  const submitted = isWriting || (isConfirming && !hookError)
+  const submitted = simulating || isWriting || (isConfirming && !hookError)
 
-  function handleSubmit(e: React.FormEvent) {
+  // Check if auction is unfunded (totalSupply is 0 or very close to 0)
+  const isUnfunded = totalSupply !== undefined && parseFloat(totalSupply) === 0
+
+  async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
     setError(null)
     if (hookError) resetWrite()
 
     if (!isConnected || !address) {
       setError("Connect your wallet first.")
+      return
+    }
+
+    if (!publicClient) {
+      setError("Network not connected.")
       return
     }
 
@@ -64,12 +79,15 @@ export function PlaceBidForm({
     }
 
     const amountWei = parseEther(amount)
-    const maxPriceQ96 = ethToQ96(maxPrice)
+    const rawQ96 = ethToQ96(maxPrice)
 
-    if (maxPriceQ96 === BigInt(0)) {
+    if (rawQ96 === BigInt(0)) {
       setError("Max price is too small to encode.")
       return
     }
+
+    // Snap to nearest valid tick boundary (round UP)
+    const maxPriceQ96 = snapToTickBoundary(rawQ96, tickSpacing)
 
     // Must be strictly above clearing price
     if (clearingPriceRaw > BigInt(0) && maxPriceQ96 <= clearingPriceRaw) {
@@ -83,25 +101,51 @@ export function PlaceBidForm({
       return
     }
 
+    const bidArgs = [
+      maxPriceQ96,
+      amountWei,
+      address,
+      floorPriceRaw, // prevTickPrice hint
+      "0x" as `0x${string}`,
+    ] as const
+
     console.log("submitBid params:", {
       auction: auctionId,
       maxPrice: maxPriceQ96.toString(),
       amount: amountWei.toString(),
       owner: address,
+      prevTickPrice: floorPriceRaw.toString(),
     })
 
-    // 4-arg submitBid: maxPrice, amount, owner, hookData
-    // Contract uses floor price as prevTick automatically
+    // Pre-flight simulation to get actual revert reason
+    setSimulating(true)
+    try {
+      await publicClient.simulateContract({
+        address: auctionId as Address,
+        abi: AUCTION_ABI,
+        functionName: "submitBid",
+        args: bidArgs,
+        value: amountWei,
+        account: address,
+      })
+    } catch (simErr: unknown) {
+      setSimulating(false)
+      const msg = simErr instanceof Error ? simErr.message : String(simErr)
+      // Extract the short/useful part of the error
+      const shortMatch = msg.match(/reverted with the following reason:\s*(.+?)(?:\n|$)/i)
+      const customMatch = msg.match(/reverted with custom error\s*["']?(\w+)\(?\)?/i)
+      const reason = customMatch?.[1] || shortMatch?.[1] || msg
+      setError(`Bid simulation failed: ${reason}`)
+      return
+    }
+    setSimulating(false)
+
+    // Simulation passed — submit for real
     writeContract({
       address: auctionId as Address,
       abi: AUCTION_ABI,
       functionName: "submitBid",
-      args: [
-        maxPriceQ96,
-        amountWei,
-        address,
-        "0x" as `0x${string}`,
-      ],
+      args: bidArgs,
       value: amountWei,
     })
   }
@@ -143,6 +187,16 @@ export function PlaceBidForm({
               Place another bid
             </button>
           </div>
+        </div>
+      )}
+
+      {isUnfunded && (
+        <div
+          role="alert"
+          className="border border-yellow-500/50 bg-yellow-500/10 px-4 py-3 font-mono text-sm text-yellow-600"
+        >
+          Auction has 0 token supply. It may not have been funded yet (tokens minted + onTokensReceived called).
+          Bids will likely revert with <code>TokensNotReceived</code>.
         </div>
       )}
 
@@ -203,20 +257,22 @@ export function PlaceBidForm({
           "hover:border-accent hover:text-accent transition-all duration-200 disabled:opacity-50 disabled:pointer-events-none",
         )}
       >
-        {isWriting
-          ? "Confirm in wallet..."
-          : isConfirming && !hookError
-            ? "Confirming..."
-            : isSuccess
-              ? "Bid placed"
-              : hookError
-                ? "Try again"
-                : "Submit bid"}
+        {simulating
+          ? "Simulating..."
+          : isWriting
+            ? "Confirm in wallet..."
+            : isConfirming && !hookError
+              ? "Confirming..."
+              : isSuccess
+                ? "Bid placed"
+                : hookError
+                  ? "Try again"
+                  : "Submit bid"}
       </button>
 
       <div className="mt-4 font-mono text-[10px] text-muted-foreground/70 border border-border/40 px-3 py-2 space-y-1">
         <p>
-          Calls <code>submitBid(maxPrice, amount, owner, hookData)</code> on the auction
+          Calls <code>submitBid(maxPrice, amount, owner, prevTickPrice, hookData)</code> on the auction
           with <code>msg.value = amount</code>.
         </p>
         <p>
