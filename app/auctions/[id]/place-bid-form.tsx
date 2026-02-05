@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useEffect } from "react"
 import { cn } from "@/lib/utils"
 import { useAccount, usePublicClient, useWriteContract, useWaitForTransactionReceipt } from "wagmi"
 import { sepolia } from "wagmi/chains"
@@ -22,6 +22,7 @@ export function PlaceBidForm({
   clearingPriceRaw,
   totalSupply,
   tickSpacing,
+  onBidSuccess,
 }: {
   auctionId: string
   tokenSymbol: string
@@ -31,6 +32,7 @@ export function PlaceBidForm({
   clearingPriceRaw: bigint
   totalSupply?: string
   tickSpacing: bigint
+  onBidSuccess?: () => void
 }) {
   const { address, isConnected } = useAccount()
   const publicClient = usePublicClient({ chainId: sepolia.id })
@@ -47,6 +49,10 @@ export function PlaceBidForm({
 
   const hookError = writeError || receiptError
   const submitted = simulating || isWriting || (isConfirming && !hookError)
+
+  useEffect(() => {
+    if (isSuccess && onBidSuccess) onBidSuccess()
+  }, [isSuccess, onBidSuccess])
 
   // Check if auction is unfunded (totalSupply is 0 or very close to 0)
   const isUnfunded = totalSupply !== undefined && parseFloat(totalSupply) === 0

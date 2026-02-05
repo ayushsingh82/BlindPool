@@ -7,6 +7,7 @@ import { sepolia } from "wagmi/chains"
 import { formatEther, type Address } from "viem"
 import { useEffect, useState, useCallback, useRef, useMemo } from "react"
 import { PlaceBidForm } from "./place-bid-form"
+import { LatestBids } from "./latest-bids"
 import { cn } from "@/lib/utils"
 import {
   AUCTION_ABI,
@@ -56,7 +57,9 @@ export default function AuctionDetailPage() {
   const [auction, setAuction] = useState<AuctionData | null>(null)
   const [loading, setLoading] = useState(true)
   const [fetchError, setFetchError] = useState<string | null>(null)
+  const [bidsRefreshKey, setBidsRefreshKey] = useState(0)
   const fetchedRef = useRef(false)
+  const handleBidSuccess = useCallback(() => setBidsRefreshKey((k) => k + 1), [])
 
   const fetchAuction = useCallback(async () => {
     if (!publicClient) return
@@ -149,7 +152,7 @@ export default function AuctionDetailPage() {
         &larr; All auctions
       </Link>
 
-      <div className="mt-8 md:mt-12 max-w-3xl">
+      <div className="mt-8 md:mt-12 max-w-5xl">
         <div className="flex items-center gap-3">
           <h1 className="font-[var(--font-bebas)] text-4xl md:text-6xl tracking-tight">CCA</h1>
           <span className={cn(
@@ -202,18 +205,32 @@ export default function AuctionDetailPage() {
 
         {canBid && (
           <div className="mt-14 pt-10 border-t border-border/40">
-            <h2 className="font-[var(--font-bebas)] text-2xl md:text-3xl tracking-tight">Place sealed bid</h2>
-            <p className="mt-2 font-mono text-xs text-muted-foreground">Your bid is confidential until the auction closes.</p>
-            <PlaceBidForm
-              auctionId={auction.address}
-              tokenSymbol="CCA"
-              floorPrice={auction.floorPrice}
-              floorPriceRaw={auction.floorPriceRaw}
-              clearingPrice={auction.clearingPrice}
-              clearingPriceRaw={auction.clearingPriceRaw}
-              totalSupply={auction.totalSupply}
-              tickSpacing={auction.tickSpacing}
-            />
+            <div className="grid grid-cols-1 md:grid-cols-[1fr,minmax(280px,380px)] gap-8 md:gap-12 items-start">
+              <div className="min-w-0">
+                <h2 className="font-[var(--font-bebas)] text-2xl md:text-3xl tracking-tight">Place sealed bid</h2>
+                <p className="mt-2 font-mono text-xs text-muted-foreground">Your bid is confidential until the auction closes.</p>
+                <PlaceBidForm
+                  auctionId={auction.address}
+                  tokenSymbol="CCA"
+                  floorPrice={auction.floorPrice}
+                  floorPriceRaw={auction.floorPriceRaw}
+                  clearingPrice={auction.clearingPrice}
+                  clearingPriceRaw={auction.clearingPriceRaw}
+                  totalSupply={auction.totalSupply}
+                  tickSpacing={auction.tickSpacing}
+                  onBidSuccess={handleBidSuccess}
+                />
+              </div>
+              <div className="min-w-0 border border-border/40 rounded-sm p-4 bg-muted/20">
+                <h3 className="font-[var(--font-bebas)] text-xl tracking-tight text-muted-foreground mb-3">Latest bids</h3>
+                <LatestBids
+                  key={bidsRefreshKey}
+                  auctionAddress={auction.address}
+                  startBlock={auction.startBlock}
+                  currentBlock={currentBlock ?? undefined}
+                />
+              </div>
+            </div>
           </div>
         )}
 

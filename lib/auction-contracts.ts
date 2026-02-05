@@ -51,7 +51,19 @@ export const FACTORY_ABI = [
   },
 ] as const
 
-// Auction contract ABI — view + write functions
+// BidSubmitted event for fetching latest bids
+export const BID_SUBMITTED_EVENT = {
+  type: "event",
+  name: "BidSubmitted",
+  inputs: [
+    { name: "id", type: "uint256", indexed: true },
+    { name: "owner", type: "address", indexed: true },
+    { name: "price", type: "uint256", indexed: false },
+    { name: "amount", type: "uint128", indexed: false },
+  ],
+} as const
+
+// Auction contract ABI — view + write functions + event
 export const AUCTION_ABI = [
   { type: "function", name: "token", inputs: [], outputs: [{ type: "address" }], stateMutability: "view" },
   { type: "function", name: "startBlock", inputs: [], outputs: [{ type: "uint64" }], stateMutability: "view" },
