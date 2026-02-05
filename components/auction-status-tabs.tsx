@@ -4,9 +4,10 @@ import { useRouter, useSearchParams } from "next/navigation"
 import { cn } from "@/lib/utils"
 import type { AuctionStatus } from "@/lib/auction-contracts"
 
+// Order: Live first, then Upcoming, then Ended (when "All" is selected, list is sorted this way)
 const TABS: { value: "all" | AuctionStatus; label: string }[] = [
   { value: "all", label: "All" },
-  { value: "active", label: "Active" },
+  { value: "active", label: "Live" },
   { value: "upcoming", label: "Upcoming" },
   { value: "ended", label: "Ended" },
 ]

@@ -20,11 +20,13 @@ const CACHE_TTL = 30_000 // 30 seconds
 
 function statusLabel(s: AuctionStatus) {
   switch (s) {
-    case "active": return "Active"
+    case "active": return "Live"
     case "upcoming": return "Upcoming"
     case "ended": return "Ended"
   }
 }
+
+const STATUS_ORDER: Record<AuctionStatus, number> = { active: 0, upcoming: 1, ended: 2 }
 
 function blocksToTime(blocks: bigint): string {
   const seconds = Number(blocks) * 12
@@ -82,8 +84,8 @@ export function AuctionList({ filter }: { filter?: AuctionStatus }) {
         from = to + BigInt(1)
       }
 
-      // Read each auction's state
-      const all = await Promise.all(
+      // Read each auction's state (creation order = allLogs order, so CCA1, CCA2, ...)
+      const raw = await Promise.all(
         allLogs.map(async (log) => {
           const results = await publicClient.multicall({
             contracts: [
@@ -115,10 +117,11 @@ export function AuctionList({ filter }: { filter?: AuctionStatus }) {
             currencyRaised: formatEther((results[5].result as bigint) ?? BigInt(0)),
             totalSupply: formatEther((results[6].result as bigint) ?? BigInt(0)),
             status: deriveStatus(startBlock, endBlock, latestBlock),
-          } satisfies OnchainAuction
+          }
         })
       )
 
+      const all = raw.map((a, i) => ({ ...a, auctionNumber: i + 1 })) as OnchainAuction[]
       setAuctions(all)
       setError(null)
       lastFetchRef.current = Date.now()
@@ -158,7 +161,7 @@ export function AuctionList({ filter }: { filter?: AuctionStatus }) {
 
   const filtered = filter
     ? auctionsWithLiveStatus.filter((a) => a.status === filter)
-    : auctionsWithLiveStatus
+    : [...auctionsWithLiveStatus].sort((a, b) => STATUS_ORDER[a.status] - STATUS_ORDER[b.status])
 
   if (loading) {
     return (
@@ -213,7 +216,7 @@ export function AuctionList({ filter }: { filter?: AuctionStatus }) {
               <div className="flex flex-wrap items-start justify-between gap-4">
                 <div>
                   <div className="flex items-center gap-3">
-                    <span className="font-[var(--font-bebas)] text-2xl md:text-4xl tracking-tight">CCA</span>
+                    <span className="font-[var(--font-bebas)] text-2xl md:text-4xl tracking-tight">CCA{auction.auctionNumber}</span>
                     <span className={cn(
                       "font-mono text-[10px] uppercase tracking-widest px-2 py-1 border",
                       auction.status === "active" && "border-accent/60 text-accent",
@@ -224,7 +227,7 @@ export function AuctionList({ filter }: { filter?: AuctionStatus }) {
                   </div>
                   <p className="mt-2 font-mono text-xs text-muted-foreground break-all">{auction.address}</p>
                   <p className="mt-1 font-mono text-[10px] text-muted-foreground/60">
-                    Token: {auction.token.slice(0, 6)}...{auction.token.slice(-4)} · Sepolia
+                    Token {auction.token.slice(0, 6)}…{auction.token.slice(-4)} · Sepolia
                   </p>
                 </div>
                 <div className="flex flex-wrap gap-6 md:gap-10 font-mono text-xs text-muted-foreground">

@@ -25,6 +25,8 @@ export interface OnchainAuction {
   /** Auction contract address (used as ID) */
   address: Address
   token: Address
+  /** Display name: CCA1, CCA2, ... by creation order (offchain name is not on contract) */
+  auctionNumber: number
   startBlock: bigint
   endBlock: bigint
   clearingPrice: string

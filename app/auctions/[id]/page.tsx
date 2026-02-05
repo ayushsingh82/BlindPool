@@ -10,6 +10,9 @@ import { PlaceBidForm } from "./place-bid-form"
 import { LatestBids } from "./latest-bids"
 import { cn } from "@/lib/utils"
 import {
+  CCA_FACTORY,
+  FACTORY_DEPLOY_BLOCK,
+  FACTORY_ABI,
   AUCTION_ABI,
   q96ToEth,
   type AuctionStatus,
@@ -17,7 +20,7 @@ import {
 
 function statusLabel(s: AuctionStatus) {
   switch (s) {
-    case "active": return "Active"
+    case "active": return "Live"
     case "upcoming": return "Upcoming"
     case "ended": return "Ended"
   }
@@ -34,6 +37,8 @@ function blocksToTime(blocks: bigint): string {
 interface AuctionData {
   address: Address
   token: Address
+  /** CCA1, CCA2, ... by creation order */
+  auctionNumber: number
   startBlock: bigint
   endBlock: bigint
   clearingPrice: string
@@ -64,23 +69,48 @@ export default function AuctionDetailPage() {
   const fetchAuction = useCallback(async () => {
     if (!publicClient) return
     try {
-      const results = await publicClient.multicall({
-        contracts: [
-          { address: auctionAddress, abi: AUCTION_ABI, functionName: "token" },
-          { address: auctionAddress, abi: AUCTION_ABI, functionName: "startBlock" },
-          { address: auctionAddress, abi: AUCTION_ABI, functionName: "endBlock" },
-          { address: auctionAddress, abi: AUCTION_ABI, functionName: "clearingPrice" },
-          { address: auctionAddress, abi: AUCTION_ABI, functionName: "floorPrice" },
-          { address: auctionAddress, abi: AUCTION_ABI, functionName: "nextBidId" },
-          { address: auctionAddress, abi: AUCTION_ABI, functionName: "currencyRaised" },
-          { address: auctionAddress, abi: AUCTION_ABI, functionName: "totalSupply" },
-          { address: auctionAddress, abi: AUCTION_ABI, functionName: "tickSpacing" },
-        ],
-      })
+      const [results, latestBlock] = await Promise.all([
+        publicClient.multicall({
+          contracts: [
+            { address: auctionAddress, abi: AUCTION_ABI, functionName: "token" },
+            { address: auctionAddress, abi: AUCTION_ABI, functionName: "startBlock" },
+            { address: auctionAddress, abi: AUCTION_ABI, functionName: "endBlock" },
+            { address: auctionAddress, abi: AUCTION_ABI, functionName: "clearingPrice" },
+            { address: auctionAddress, abi: AUCTION_ABI, functionName: "floorPrice" },
+            { address: auctionAddress, abi: AUCTION_ABI, functionName: "nextBidId" },
+            { address: auctionAddress, abi: AUCTION_ABI, functionName: "currencyRaised" },
+            { address: auctionAddress, abi: AUCTION_ABI, functionName: "totalSupply" },
+            { address: auctionAddress, abi: AUCTION_ABI, functionName: "tickSpacing" },
+          ],
+        }),
+        publicClient.getBlockNumber(),
+      ])
+
+      const tokenAddress = results[0].result as Address
+
+      // Creation order from factory events → CCA1, CCA2, ...
+      const CHUNK = BigInt(1000)
+      const auctionAddresses: Address[] = []
+      let from = FACTORY_DEPLOY_BLOCK
+      while (from <= latestBlock) {
+        const to = from + CHUNK - BigInt(1) > latestBlock ? latestBlock : from + CHUNK - BigInt(1)
+        const chunk = await publicClient.getLogs({
+          address: CCA_FACTORY,
+          event: FACTORY_ABI[0],
+          fromBlock: from,
+          toBlock: to,
+        })
+        for (const log of chunk) {
+          if (log.args.auction) auctionAddresses.push(log.args.auction)
+        }
+        from = to + BigInt(1)
+      }
+      const auctionNumber = auctionAddresses.indexOf(auctionAddress) + 1 || 1
 
       setAuction({
         address: auctionAddress,
-        token: results[0].result as Address,
+        token: tokenAddress,
+        auctionNumber,
         startBlock: (results[1].result as bigint) ?? BigInt(0),
         endBlock: (results[2].result as bigint) ?? BigInt(0),
         clearingPrice: q96ToEth((results[3].result as bigint) ?? BigInt(0)),
@@ -154,7 +184,7 @@ export default function AuctionDetailPage() {
 
       <div className="mt-8 md:mt-12 max-w-5xl">
         <div className="flex items-center gap-3">
-          <h1 className="font-[var(--font-bebas)] text-4xl md:text-6xl tracking-tight">CCA</h1>
+          <h1 className="font-[var(--font-bebas)] text-4xl md:text-6xl tracking-tight">CCA{auction.auctionNumber}</h1>
           <span className={cn(
             "font-mono text-[10px] uppercase tracking-widest px-2 py-1 border",
             status === "active" && "border-accent/60 text-accent",
@@ -164,7 +194,9 @@ export default function AuctionDetailPage() {
           </span>
         </div>
         <p className="mt-2 font-mono text-xs text-muted-foreground break-all">{auction.address}</p>
-        <p className="mt-1 font-mono text-[10px] text-muted-foreground/60">Token: {auction.token} · Sepolia</p>
+        <p className="mt-1 font-mono text-[10px] text-muted-foreground/60">
+          Token {auction.token.slice(0, 6)}…{auction.token.slice(-4)} · Sepolia
+        </p>
 
         <dl className="mt-10 grid grid-cols-2 md:grid-cols-4 gap-6 font-mono text-sm">
           <div>
@@ -211,7 +243,7 @@ export default function AuctionDetailPage() {
                 <p className="mt-2 font-mono text-xs text-muted-foreground">Your bid is confidential until the auction closes.</p>
                 <PlaceBidForm
                   auctionId={auction.address}
-                  tokenSymbol="CCA"
+                  tokenSymbol={`CCA${auction.auctionNumber}`}
                   floorPrice={auction.floorPrice}
                   floorPriceRaw={auction.floorPriceRaw}
                   clearingPrice={auction.clearingPrice}
