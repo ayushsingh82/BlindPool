@@ -1,200 +1,528 @@
-# Zama Encrypted Bidding — How To
+# Zama Encrypted Bidding — Smart Contract Reference
 
-This guide explains how to **encrypt the two bid inputs** (amount and max price) with Zama fhEVM, and how **bid amount and total amount are revealed** after the auction ends — with either **auction creator decrypt** or **automatic reveal**.
-
----
-
-## 1. The two inputs to encrypt
-
-When a user places a bid, the CCA contract expects:
-
-| Input        | Meaning              | Onchain (plain CCA) | With Zama (BlindPool)   |
-|-------------|----------------------|----------------------|--------------------------|
-| **Max price** | Willingness to pay (Q96) | `submitBid(maxPrice, …)` | **Encrypted** → `encMaxPrice` (euint64) |
-| **Amount**    | ETH to commit (wei)  | `submitBid(…, amount, …)` + `msg.value` | **Encrypted** → `encAmount` (euint64) |
-
-So you encrypt **exactly these two values**; nothing else in the bid needs to be encrypted for privacy. The contract you use for sealed bids is **BlindPoolCCA** (in the `cca/` repo), which stores `euint64 encMaxPrice` and `euint64 encAmount` and later forwards the decrypted pair to the real CCA.
+Privacy wrapper for Uniswap CCA using Zama fhEVM. Bids are encrypted on-chain during the auction and only revealed after the blind bid deadline passes.
 
 ---
 
-## 2. High-level flow
+## Architecture Overview
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│  DURING AUCTION (blind bidding)                                              │
-│  • User enters: amount (ETH), max price (ETH per token)                      │
-│  • Frontend: convert to wei + Q96, then encrypt with Zama Relayer SDK         │
-│  • Tx: BlindPoolCCA.submitBlindBid(encMaxPrice, encAmount, inputProof)       │
-│  • msg.value = user’s ETH (escrow; must cover worst-case amount)             │
-│  → Nobody can read amount or max price onchain                                │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│  AFTER BLIND BID DEADLINE (reveal phase)                                     │
-│  • Anyone calls BlindPoolCCA.requestReveal() (see “Who can call?” below)     │
-│  • All stored ciphertexts become “publicly decryptable” via Zama KMS         │
-│  → Bid values stay on-chain as ciphertext; decryption happens off-chain      │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│  DECRYPT + FORWARD (before CCA endBlock)                                     │
-│  • For each blind bid: relayer SDK publicDecrypt(encMaxPrice, encAmount)      │
-│  • Get back clear maxPrice + amount + decryptionProof                        │
-│  • Tx: BlindPoolCCA.forwardBidToCCA(bidId, maxPrice, amount, proof)          │
-│  → Real CCA receives plain bid; settlement (exitBid, claimTokens) as usual  │
-│  → Bid amount and total amount are now “revealed” (on CCA + in events)        │
-└─────────────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│                         BlindPoolCCA.sol                            │
+│  Stores encrypted bids (euint64 handles) + ETH escrow              │
+│                                                                      │
+│  Phase 1: submitBlindBid()   ← encrypted inputs from relayer SDK   │
+│  Phase 2: requestReveal()    ← marks ciphertexts decryptable       │
+│  Phase 3: forwardBidToCCA()  ← sends decrypted bids to real CCA   │
+│                         │                                            │
+│                         ▼                                            │
+│              ┌─────────────────────┐                                 │
+│              │  Uniswap CCA        │  ← receives plain bids         │
+│              │  (settlement layer) │  ← exitBid / claimTokens       │
+│              └─────────────────────┘                                 │
+└──────────────────────────────────────────────────────────────────────┘
+
+Zama fhEVM stack (Sepolia):
+  ACL:            0xf0Ffdc93b7E186bC2f8CB3dAA75D86d1930A433D
+  FHEVMExecutor:  0x92C920834Ec8941d2C77D188936E1f7A6f49c127
+  KMS Verifier:   0xbE0E383937d564D7FF0BC3b46c51f0bF8d5C311A
+  InputVerifier:  0xBBC1fFCdc7C316aAAd72E807D9b0272BE8F84DA0
+
+Uniswap CCA (Sepolia):
+  CCA Factory:    0xcca1101C61cF5cb44C968947985300DF945C3565
 ```
 
-So: **encrypt the two inputs** in the place-bid form; **reveal** = make decryptable then decrypt and forward so the underlying CCA sees real amounts.
+---
+
+## Contract: BlindPoolCCA.sol
+
+**Source:** `scripts/src/BlindPoolCCA.sol` (303 lines)
+**Solidity:** `^0.8.24`
+**Inherits:** `ZamaEthereumConfig` (auto-configures Zama coprocessor addresses)
+**Dependencies:** `@fhevm/solidity` (FHE.sol, EncryptedTypes.sol)
+
+### State
+
+```solidity
+address public admin;                          // Deployer
+ICCA public cca;                               // Real Uniswap CCA address
+uint64 public blindBidDeadline;                // Block after which blind bids rejected
+bool public revealed;                          // Whether requestReveal() has been called
+uint256 public nextBlindBidId;                 // Counter (0-indexed)
+
+mapping(uint256 => BlindBid) internal _blindBids;
+mapping(uint256 => uint256) public ccaBidIds;  // blindBidId → real CCA bidId
+
+// Encrypted aggregates (privacy-preserving stats)
+euint64 internal _encHighestPrice;
+euint64 internal _encTotalDemand;
+```
+
+### BlindBid Struct
+
+```solidity
+struct BlindBid {
+    address bidder;          // PUBLIC — who placed the bid
+    euint64 encMaxPrice;     // ENCRYPTED — max price (Q96 scaled to uint64)
+    euint64 encAmount;       // ENCRYPTED — bid amount in wei
+    uint256 ethDeposit;      // PUBLIC — actual ETH held in escrow
+    bool forwarded;          // PUBLIC — whether forwarded to CCA
+}
+```
+
+**Privacy guarantee:** During the auction, only `bidder`, `ethDeposit`, and `forwarded` are readable. The `encMaxPrice` and `encAmount` fields are opaque `euint64` handles — unreadable without Zama KMS decryption.
+
+### Data Visibility
+
+| Field | During Auction | After Reveal | After Forward |
+|-------|---------------|-------------|---------------|
+| bidder address | Public | Public | Public |
+| ETH deposit | Public | Public | Public |
+| maxPrice | Encrypted (euint64) | Decryptable via KMS | Public on CCA |
+| amount | Encrypted (euint64) | Decryptable via KMS | Public on CCA |
+| clearing price | N/A | N/A | Set by CCA |
 
 ---
 
-## 2.1 Who can call `requestReveal()`? Who is “someone”?
+## Phase 1: Blind Bidding
 
-In the **current BlindPoolCCA contract**, `requestReveal()` has **no access control**: **anyone** can call it once `block.number >= blindBidDeadline`. So “someone” can be:
+### `submitBlindBid()`
 
-- The **auction creator** (they can do it from the app or a script).
-- Any **bidder** or third party (e.g. a bot or a “Reveal” button in the UI that any user can press).
-- A **backend / keeper** that watches the deadline and calls it automatically.
+```solidity
+function submitBlindBid(
+    externalEuint64 _encMaxPrice,   // Encrypted max price from relayer SDK
+    externalEuint64 _encAmount,     // Encrypted bid amount from relayer SDK
+    bytes calldata _inputProof      // ZK proof of plaintext knowledge
+) external payable
+```
 
-So it is **not** restricted to the auction creator by default. If you want only the auction creator to trigger reveal, you need to change the contract (e.g. add `onlyAdmin` or `onlyAuctionCreator` to `requestReveal()`).
+**Requirements:**
+- `block.number < blindBidDeadline` — auction must be open
+- `msg.value > 0` — must deposit ETH as escrow
+
+**What happens:**
+1. `FHE.fromExternal()` verifies the ZK proof and converts external ciphertext to internal `euint64` handles
+2. Stores `BlindBid` with encrypted fields + plaintext ETH deposit
+3. Updates encrypted aggregates:
+   - `_encHighestPrice` = `FHE.select(FHE.lt(current, new), new, current)` — encrypted max
+   - `_encTotalDemand` = `FHE.add(current, newAmount)` — encrypted sum
+4. Sets FHE ACL permissions:
+   - `FHE.allowThis()` — contract can operate on handles in future txs
+   - `FHE.allow(handle, msg.sender)` — bidder can re-encrypt/view their own bid
+5. Emits `BlindBidPlaced(bidId, bidder)`
+
+**Frontend call:**
+
+```typescript
+// Encrypt bid client-side using Zama relayer SDK
+const input = instance.createEncryptedInput(blindPoolAddress, userAddress);
+input.add64(BigInt(maxPriceQ96));   // encrypted input 1
+input.add64(BigInt(amountWei));     // encrypted input 2
+const encrypted = await input.encrypt();
+
+// Submit to BlindPoolCCA (NOT directly to CCA)
+await writeContract({
+  address: blindPoolAddress,
+  abi: BlindPoolABI,
+  functionName: 'submitBlindBid',
+  args: [encrypted.handles[0], encrypted.handles[1], encrypted.inputProof],
+  value: amountWei,  // ETH escrow
+});
+```
 
 ---
 
-## 2.2 Where can decrypted amounts be seen?
+## Phase 2: Reveal
 
-Decryption does **not** happen on-chain. It happens **off-chain** via Zama’s relayer (KMS):
+### `requestReveal()`
 
-1. **Off-chain (whoever runs the relayer):**  
-   After `requestReveal()` has been called, you call the Zama relayer’s **publicDecrypt** (e.g. via `@zama-fhe/relayer-sdk`) with the encrypted handles for a bid. The relayer returns the **decrypted amount and max price** (and a proof) in the API response. So the decrypted values are visible **in the app or script** that calls the relayer (e.g. auction creator’s dashboard, your backend, or a bot).
+```solidity
+function requestReveal() external
+```
 
-2. **On-chain (everyone):**  
-   When someone then calls **forwardBidToCCA(bidId, clearMaxPrice, clearAmount, proof)**, the plain values are sent to the **real CCA** contract. After that, the bid (and its amount) is **public on-chain**: in the CCA’s state, in **BidSubmitted** (and other) events, and on block explorers (e.g. Etherscan). So once a bid is forwarded, **everyone** can see that bid’s amount and max price on the CCA.
+**Requirements:**
+- `block.number >= blindBidDeadline` — deadline must have passed
+- `!revealed` — can only call once
 
-**Summary:** The **auction creator** (or whoever runs the relayer) sees decrypted amounts **first** in their relayer response. After **forwardBidToCCA** is used, those same amounts are **public on-chain** on the CCA and on explorers.
+**What happens:**
+1. Sets `revealed = true`
+2. Loops through all blind bids and calls `FHE.makePubliclyDecryptable()` on each `encMaxPrice` and `encAmount`
+3. Also reveals encrypted aggregates (`_encHighestPrice`, `_encTotalDemand`)
+4. Emits `BidsRevealed(totalBids)`
+
+**Who can call:** Anyone. No access control by default. If you want creator-only reveal, add `onlyAdmin` modifier.
+
+**After this tx:** The Zama KMS will allow public decryption of all bid ciphertexts via the relayer SDK. The values are NOT automatically decrypted — an off-chain call to the relayer is needed.
 
 ---
 
-## 3. How to implement encrypted bidding (nextui-starter4)
+## Phase 3: Forward to CCA
 
-### 3.1 Contract side (already in `cca/`)
+### `forwardBidToCCA()`
 
-- **BlindPoolCCA** wraps one CCA auction:
-  - `submitBlindBid(encMaxPrice, encAmount, inputProof)` — stores encrypted amount and max price.
-  - `requestReveal()` — after blind bid deadline; marks all ciphertexts publicly decryptable.
-  - `forwardBidToCCA(blindBidId, clearMaxPrice, clearAmount, decryptionProof)` — reveals one bid to the CCA.
+```solidity
+function forwardBidToCCA(
+    uint256 _blindBidId,
+    uint64 _clearMaxPrice,      // Decrypted max price
+    uint64 _clearAmount,        // Decrypted amount
+    bytes calldata _decryptionProof  // KMS cryptographic proof
+) external
+```
 
-- Deploy BlindPoolCCA **per auction** (pointing to that auction’s CCA address), with a `blindBidDeadline` a few blocks before the CCA’s `endBlock`.
+**Requirements:**
+- `revealed == true`
+- Bid not already forwarded
 
-### 3.2 Frontend: encrypt the two inputs
+**What happens:**
+1. **Verifies KMS proof** — reconstructs the original ciphertext handles and calls:
+   ```solidity
+   bytes32[] memory handles = new bytes32[](2);
+   handles[0] = FHE.toBytes32(bb.encMaxPrice);
+   handles[1] = FHE.toBytes32(bb.encAmount);
+   bytes memory encodedClear = abi.encode(_clearMaxPrice, _clearAmount);
+   FHE.checkSignatures(handles, encodedClear, _decryptionProof);
+   ```
+   This cryptographically proves the decrypted values match the original ciphertexts.
 
-1. **Install Zama Relayer SDK**
+2. **Calculates ETH to send** — `min(clearAmount, ethDeposit)`
 
-   ```bash
-   npm install @zama-fhe/relayer-sdk
+3. **Forwards to real CCA:**
+   ```solidity
+   uint256 ccaBidId = cca.submitBid{value: toSend}(
+       uint256(_clearMaxPrice),  // maxPrice (Q96)
+       uint128(_clearAmount),    // amount
+       bb.bidder,                // original bidder remains owner
+       bytes("")                 // no hook data
+   );
    ```
 
-2. **Create a Zama instance (Sepolia)**
+4. **Refunds excess ETH** — if `ethDeposit > clearAmount`, the difference is sent back to the bidder
 
-   Use the same config as in `cca/README.md` (ACL, KMS, InputVerifier, verifying contracts, chainId 11155111, relayer URL).
+5. Emits `BidForwarded(blindBidId, ccaBidId)` and optionally `EthRefunded(...)`
 
-3. **In the “Place bid” form (instead of calling CCA directly)**
+### `forwardBidsToCCA()` — Batch
 
-   - User inputs: **Amount (ETH)** and **Max price (ETH per token)**.
-   - Convert to wei and Q96 (same as current plain CCA logic).
-   - **Encrypt only these two values:**
+```solidity
+function forwardBidsToCCA(
+    uint256[] calldata _blindBidIds,
+    uint64[] calldata _clearMaxPrices,
+    uint64[] calldata _clearAmounts,
+    bytes[] calldata _decryptionProofs
+) external
+```
 
-   ```ts
-   const input = instance.createEncryptedInput(blindPoolAddress, userAddress);
-   input.add64(BigInt(maxPriceQ96));   // 1st encrypted input
-   input.add64(BigInt(amountWei));     // 2nd encrypted input
-   const encrypted = await input.encrypt();
-   ```
-
-   - Call **BlindPoolCCA** (not the CCA):
-
-   ```ts
-   await writeContract({
-     address: blindPoolAddress,
-     abi: BlindPoolABI,
-     functionName: 'submitBlindBid',
-     args: [encrypted.handles[0], encrypted.handles[1], encrypted.inputProof],
-     value: amountWei,  // or max escrow if you cap differently
-   });
-   ```
-
-So the **only** change in “what to send” is: the two numbers become two encrypted handles + one proof; the contract is BlindPoolCCA.
-
-### 3.3 UX details
-
-- **Auction page** must know whether this auction uses **plain CCA** or **BlindPoolCCA** (e.g. backend or config per auction).
-- If BlindPool: show “Place sealed bid” and use the encrypted flow above; if plain CCA: keep current `submitBid` on the auction contract.
-- **Latest bids**: for BlindPool you can show “Sealed” or count of blind bids until reveal; after forward, you can show the same “latest bids” from the underlying CCA if you read from it.
+Calls `forwardBidToCCA` for each bid in a single tx. Arrays must all be the same length.
 
 ---
 
-## 4. After auction ends: revealing bid amount and total amount
+## View Functions
 
-“Reveal” here means: (1) allow decryption of stored ciphertexts, and (2) actually decrypt and forward so the CCA (and thus everyone) sees real **bid amount** and **total amount**.
+```solidity
+// Public bid info (no encryption)
+function getBlindBidInfo(uint256 _blindBidId)
+    external view returns (address bidder, uint256 ethDeposit, bool forwarded);
 
-### 4.1 Who can call `requestReveal()`?
+// Encrypted handles (for re-encryption via relayer SDK)
+function getEncMaxPrice(uint256 _blindBidId) external view returns (euint64);
+function getEncAmount(uint256 _blindBidId) external view returns (euint64);
 
-- **Current contract:** anyone can call `requestReveal()` after `blindBidDeadline`.
-- So today it’s already **automatic** in the sense that no special role is required; any bot or frontend can call it once the deadline has passed.
-
-### 4.2 Who can decrypt and forward?
-
-- **Decryption** is done **off-chain** via Zama’s relayer (KMS). Once `requestReveal()` has been called, the relayer can decrypt any of the stored ciphertexts and return clear values + a proof.
-- **Forward:** anyone can call `forwardBidToCCA(bidId, clearMaxPrice, clearAmount, proof)` as long as they have a valid `decryptionProof` from the relayer. So whoever runs the relayer (or has access to it) can get the decrypted (amount, max price) and submit the forward tx.
-
-So in practice:
-
-- **Option A — Auction creator decrypts**
-  - **Restrict who may trigger reveal:** change `requestReveal()` so only `admin` (or auction creator) can call it. Then only the creator “opens” the envelope.
-  - **Restrict who may forward:** keep `forwardBidToCCA` as-is; only someone with relayer access can get proofs. If only the auction creator runs the relayer (or has API keys), then effectively only the creator can decrypt and forward. Optionally you could add an `onlyAdmin` (or `onlyAuctionCreator`) modifier to `forwardBidToCCA` so that even with a proof, only the creator can submit the tx — then bid amount and total amount are only revealed when the creator runs the relayer and forwards.
-
-- **Option B — Automatic reveal**
-  - **Leave `requestReveal()` as public.** After `blindBidDeadline`, a keeper/bot or the frontend calls `requestReveal()` once.
-  - **Run a small service or script** that:
-    1. For each blind bid ID, calls the Zama relayer `publicDecrypt([encMaxPriceHandle, encAmountHandle])` (handles from the contract).
-    2. Gets back clear (maxPrice, amount) and the decryption proof.
-    3. Calls `forwardBidToCCA(bidId, maxPrice, amount, proof)`.
-  - After all bids are forwarded, the real CCA has all bids; **bid amount and total amount** are visible on the CCA (and in events) as usual. So “automatic” = no manual step by the auction creator; a public relayer or your backend does decrypt + forward.
-
-### 4.3 Summary table
-
-| Aspect              | Auction creator decrypts (A)     | Automatic (B)                          |
-|---------------------|-----------------------------------|----------------------------------------|
-| Who calls `requestReveal()` | Only creator (add access control) | Anyone / bot / frontend                |
-| Who gets decryption | Only creator (runs relayer)      | Relayer (public or your backend)       |
-| Who calls `forwardBidToCCA` | Creator (optional: restrict to admin) | Bot / backend with relayer + proof     |
-| When amounts visible| When creator runs relayer+forward | When bot/backend runs after reveal     |
+// Encrypted aggregates
+function encHighestPrice() external view returns (euint64);
+function encTotalDemand() external view returns (euint64);
+```
 
 ---
 
-## 5. Minimal code changes (nextui-starter4)
+## Events
 
-1. **Config**
-   - Add per-auction: `ccaAddress` (current) and optional `blindPoolAddress`.
-   - If `blindPoolAddress` is set, use encrypted flow; otherwise use current plain `submitBid` on `ccaAddress`.
-
-2. **Place-bid form**
-   - If BlindPool: use Zama relayer SDK to encrypt **amount (wei)** and **max price (Q96)** (the two inputs), then `submitBlindBid(handles[0], handles[1], proof)` with `value` as escrow.
-   - If plain CCA: keep existing `submitBid(maxPrice, amount, owner, hookData)` with `value: amount`.
-
-3. **After auction / blind deadline**
-   - **Option A:** Creator-only: add `onlyAdmin` (or similar) to `requestReveal()` and optionally to `forwardBidToCCA` in BlindPoolCCA; creator runs relayer once and forwards all bids.
-   - **Option B:** Automatic: call `requestReveal()` from the app or a script when `block.number >= blindBidDeadline`; run a small job that for each bid ID calls relayer `publicDecrypt` then `forwardBidToCCA`. Bid amount and total amount are then revealed on the CCA as usual.
+```solidity
+event BlindBidPlaced(uint256 indexed blindBidId, address indexed bidder);
+event BidsRevealed(uint256 totalBids);
+event BidForwarded(uint256 indexed blindBidId, uint256 indexed ccaBidId);
+event EthRefunded(uint256 indexed blindBidId, address indexed bidder, uint256 amount);
+```
 
 ---
 
-## 6. References
+## Errors
 
-- **cca/README.md** — BlindPool flow, Sepolia addresses, relayer SDK snippet.
-- **cca/src/BlindPoolCCA.sol** — `submitBlindBid`, `requestReveal`, `forwardBidToCCA`; the two encrypted fields are `encMaxPrice` and `encAmount`.
-- Zama fhEVM: [docs](https://docs.zama.org/protocol/solidity-guides), [Relayer SDK](https://docs.zama.org/protocol/relayer-sdk-guides).
+```solidity
+error AuctionStillOpen();    // requestReveal() called before deadline
+error AuctionClosed();       // submitBlindBid() called after deadline
+error NotRevealed();         // forwardBidToCCA() called before reveal
+error AlreadyRevealed();     // requestReveal() called twice
+error AlreadyForwarded();    // forwardBidToCCA() called on same bid twice
+error OnlyAdmin();           // reserved for access control extensions
+error NoDeposit();           // submitBlindBid() called with msg.value == 0
+```
 
-So: **yes, the two inputs (amount and max price) are encrypted with Zama; after the auction ends, requestReveal + decrypt + forward makes bid amount and total amount visible on the CCA; you can make that “auction creator only” (access control + creator runs relayer) or “automatic” (anyone reveals, bot/relayer decrypts and forwards).**
+---
+
+## FHE Operations Used
+
+| Operation | Where | Purpose |
+|-----------|-------|---------|
+| `FHE.fromExternal(handle, proof)` | submitBlindBid | Convert relayer SDK ciphertext to internal euint64 |
+| `FHE.asEuint64(0)` | constructor | Initialize encrypted aggregates to zero |
+| `FHE.lt(a, b)` | submitBlindBid | Encrypted comparison for highest price |
+| `FHE.select(cond, a, b)` | submitBlindBid | Encrypted conditional assignment |
+| `FHE.add(a, b)` | submitBlindBid | Encrypted sum for total demand |
+| `FHE.allowThis(handle)` | submitBlindBid, constructor | Grant contract permission to use handle |
+| `FHE.allow(handle, addr)` | submitBlindBid | Grant bidder permission to re-encrypt |
+| `FHE.makePubliclyDecryptable(handle)` | requestReveal | Mark ciphertext for KMS decryption |
+| `FHE.toBytes32(handle)` | forwardBidToCCA | Convert handle for proof verification |
+| `FHE.checkSignatures(handles, clear, proof)` | forwardBidToCCA | Verify KMS decryption proof |
+| `FHE.isInitialized(handle)` | tests | Check handle is valid (not null) |
+
+---
+
+## ICCA Interface
+
+The minimal interface BlindPoolCCA uses to interact with the real Uniswap CCA:
+
+```solidity
+interface ICCA {
+    function submitBid(uint256 maxPrice, uint128 amount, address owner, bytes calldata hookData)
+        external payable returns (uint256 bidId);
+    function exitBid(uint256 bidId) external;
+    function claimTokens(uint256 bidId) external;
+    function endBlock() external view returns (uint64);
+    function startBlock() external view returns (uint64);
+    function floorPrice() external view returns (uint256);
+    function tickSpacing() external view returns (uint256);
+    function clearingPrice() external view returns (uint256);
+    function token() external view returns (address);
+    function totalSupply() external view returns (uint128);
+}
+```
+
+---
+
+## Deployment
+
+### 1. Deploy a CCA auction
+
+**Script:** `scripts/script/DeployCCA.s.sol`
+
+```bash
+make deploy-cca
+```
+
+Deploys a mock ERC20 token + CCA auction via the Sepolia factory. Parameters:
+
+```solidity
+AuctionParameters({
+    currency: address(0),                          // ETH
+    tokensRecipient: deployer,
+    fundsRecipient: deployer,
+    startBlock: block.number + 10,
+    endBlock: block.number + 110,                  // 100-block duration
+    claimBlock: block.number + 110,
+    tickSpacing: 79228162514264334008320,           // Q96 floor (1 ETH = 1M tokens)
+    floorPrice: 79228162514264334008320,
+    validationHook: address(0),
+    requiredCurrencyRaised: 0,
+    auctionStepsData: [100% linear over 100 blocks]
+})
+```
+
+The script also mints 1B tokens to the auction and calls `onTokensReceived()` to activate it.
+
+### 2. Deploy BlindPoolCCA wrapper
+
+**Script:** `scripts/script/DeployBlindPool.s.sol`
+
+```bash
+make deploy-blindpool AUCTION_ADDRESS=0x...
+```
+
+- Reads the CCA's `endBlock`
+- Sets `blindBidDeadline = endBlock - 20` (20 blocks of buffer for reveal + forward)
+- Deploys `BlindPoolCCA(ccaAddress, blindDeadline)`
+
+### 3. Check status
+
+**Script:** `scripts/script/CheckBlindPool.s.sol`
+
+```bash
+make check BLIND_POOL_ADDRESS=0x...
+```
+
+Shows: addresses, timing, bid count, individual bid info (bidder, deposit, forwarded status).
+
+### 4. Reveal bids
+
+**Script:** `scripts/script/RevealBlindPool.s.sol`
+
+```bash
+make reveal BLIND_POOL_ADDRESS=0x...
+```
+
+Calls `requestReveal()`. Requires deadline to have passed.
+
+### 5. Forward decrypted bids
+
+**Script:** `scripts/script/ForwardBids.s.sol`
+
+```bash
+BLIND_POOL_ADDRESS=0x... \
+FORWARD_BID_ID=0 \
+FORWARD_CLEAR_MAX_PRICE=100000 \
+FORWARD_CLEAR_AMOUNT=500000 \
+FORWARD_PROOF=0xabcdef... \
+forge script script/ForwardBids.s.sol:ForwardBids \
+  --rpc-url $SEPOLIA_RPC_URL --private-key $PRIVATE_KEY --broadcast -vv
+```
+
+The decrypted values + KMS proof come from the Zama relayer SDK's `publicDecrypt()` call (off-chain).
+
+---
+
+## Testing
+
+**File:** `scripts/anviltest/BlindPoolCCA.t.sol` (412 lines)
+
+```bash
+make test
+# or: forge test --match-contract BlindPoolCCATest -vv
+```
+
+Uses a `TestBlindPoolCCA` wrapper with `mockSubmitBlindBid()` that uses `FHE.asEuint64()` (trivial encrypt) instead of `FHE.fromExternal()` (which requires the relayer SDK).
+
+### Test Cases
+
+| Test | What it verifies |
+|------|-----------------|
+| `test_DeploymentAddresses` | fhEVM stack, CCA, BlindPool all deployed correctly |
+| `test_BlindBidsAreHidden` | Bid values are opaque euint64 handles; only bidder/deposit visible |
+| `test_CannotBidAfterDeadline` | Reverts with `AuctionClosed` after deadline block |
+| `test_CannotRevealBeforeDeadline` | Reverts with `AuctionStillOpen` before deadline |
+| `test_RevealFlow` | 3 bids submitted, reveal succeeds, double-reveal blocked |
+| `test_MustDepositEth` | Reverts with `NoDeposit` if `msg.value == 0` |
+| `test_CannotForwardBeforeReveal` | Reverts with `NotRevealed` |
+| `test_FullFlow` | E2E: submit 2 bids → verify privacy → reveal → verify state |
+
+**Note:** `forwardBidToCCA` requires real KMS decryption proofs only available on Sepolia. Local Anvil tests verify everything up to the reveal phase.
+
+---
+
+## Reveal Options (Access Control)
+
+### Option A: Creator-Only Reveal
+
+Add access control to the contract:
+- Add `onlyAdmin` modifier to `requestReveal()` — only creator can trigger reveal
+- Optionally add `onlyAdmin` to `forwardBidToCCA()` — only creator can forward
+- Creator runs the relayer and sees decrypted values first
+
+### Option B: Automatic Reveal (current default)
+
+- `requestReveal()` is public — any bot/user/keeper can call it after deadline
+- A backend service or script:
+  1. Calls `requestReveal()` once deadline passes
+  2. For each bid: calls relayer `publicDecrypt([priceHandle, amountHandle])`
+  3. Gets back clear values + KMS proof
+  4. Calls `forwardBidToCCA(bidId, price, amount, proof)`
+- After all bids forwarded, the CCA has full bid data and settlement proceeds normally
+
+| Aspect | Creator-Only (A) | Automatic (B) |
+|--------|------------------|---------------|
+| `requestReveal()` | Admin only (needs contract change) | Anyone after deadline |
+| Decryption | Creator runs relayer | Public relayer / backend |
+| `forwardBidToCCA()` | Admin only (optional) | Anyone with valid proof |
+| When amounts visible | When creator forwards | When bot/backend forwards |
+
+---
+
+## Security Properties
+
+1. **Sealed bids** — `encMaxPrice` and `encAmount` are `euint64` handles, unreadable without KMS
+2. **MEV resistance** — validators cannot read bid prices/amounts, preventing sandwich attacks and front-running
+3. **KMS proof verification** — `FHE.checkSignatures()` cryptographically proves decrypted values match the original ciphertexts
+4. **ETH escrow** — `msg.value` held in contract, excess refunded after forward
+5. **ACL permissions** — encrypted handles only accessible by contract + original bidder
+6. **Immutable forwarding** — once forwarded to CCA, a bid cannot be changed or replayed (`AlreadyForwarded` check)
+7. **Deadline enforcement** — blind bids rejected after deadline, reveal rejected before deadline
+
+---
+
+## Price Encoding (Q96)
+
+Prices in the CCA use **Q96 fixed-point** format (96-bit fractional precision):
+
+```
+price_Q96 = ethPrice * 2^96
+```
+
+The BlindPoolCCA stores encrypted prices as `euint64` — a scaled-down representation that fits in 64 bits. The `FloorPrice` in the deployment example:
+
+```
+79228162514264334008320 = (2^96) / 1_000_000 → 1 ETH buys 1,000,000 tokens
+```
+
+Frontend conversion helpers (in `lib/auction-contracts.ts`):
+
+```typescript
+const Q96 = BigInt(2) ** BigInt(96);
+function ethToQ96(ethPrice: string): bigint { ... }
+function q96ToEth(q96Price: bigint): string { ... }
+```
+
+---
+
+## Frontend Integration (Place Bid Form)
+
+The frontend needs to know whether an auction uses **plain CCA** or **BlindPoolCCA**:
+
+- **Plain CCA:** Call `submitBid(maxPrice, amount, owner, prevTickPrice, hookData)` directly on the CCA with `msg.value = amount`
+- **BlindPoolCCA:** Encrypt inputs with Zama relayer SDK, call `submitBlindBid(handle1, handle2, proof)` on BlindPoolCCA with `msg.value = amount`
+
+```typescript
+import { createInstance } from '@zama-fhe/relayer-sdk';
+
+const instance = await createInstance({
+  aclContractAddress: '0xf0Ffdc93b7E186bC2f8CB3dAA75D86d1930A433D',
+  kmsContractAddress: '0xbE0E383937d564D7FF0BC3b46c51f0bF8d5C311A',
+  chainId: 11155111,
+  relayerUrl: 'https://relayer.testnet.zama.org',
+});
+
+// Encrypt the two bid inputs
+const input = instance.createEncryptedInput(blindPoolAddress, userAddress);
+input.add64(BigInt(maxPriceQ96));
+input.add64(BigInt(amountWei));
+const encrypted = await input.encrypt();
+
+// Submit sealed bid
+await writeContract({
+  address: blindPoolAddress,
+  abi: BlindPoolABI,
+  functionName: 'submitBlindBid',
+  args: [encrypted.handles[0], encrypted.handles[1], encrypted.inputProof],
+  value: BigInt(amountWei),
+});
+```
+
+---
+
+## File Map
+
+| File | Purpose |
+|------|---------|
+| `scripts/src/BlindPoolCCA.sol` | Main contract (303 lines) |
+| `scripts/script/DeployCCA.s.sol` | Deploy CCA auction on Sepolia |
+| `scripts/script/DeployBlindPool.s.sol` | Deploy BlindPoolCCA wrapper |
+| `scripts/script/RevealBlindPool.s.sol` | Call requestReveal() |
+| `scripts/script/ForwardBids.s.sol` | Forward decrypted bid to CCA |
+| `scripts/script/CheckBlindPool.s.sol` | Read-only status check |
+| `scripts/anviltest/BlindPoolCCA.t.sol` | Full test suite (412 lines) |
+| `scripts/Makefile` | Build, test, deploy commands |
+| `scripts/foundry.toml` | Foundry config (solc 0.8.26, optimizer) |
+
+---
+
+## References
+
+- [Zama fhEVM Solidity Guides](https://docs.zama.org/protocol/solidity-guides)
+- [Zama Relayer SDK](https://docs.zama.org/protocol/relayer-sdk-guides)
+- [Uniswap CCA](https://github.com/Uniswap/continuous-clearing-auction)

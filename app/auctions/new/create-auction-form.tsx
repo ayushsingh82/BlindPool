@@ -602,7 +602,7 @@ export function CreateAuctionForm() {
       {step === "activating" && auctionAddress && (
         <div className="space-y-6">
           <div className="border border-accent/50 bg-accent/10 px-4 py-3 font-mono text-sm text-accent">
-            {isMintSuccess ? "Tokens minted!" : "Skipped minting."} Now activate the auction.
+            {isMintSuccess ? "Tokens minted!" : "Skipped minting."} Now auction getting activated.
           </div>
 
           <div className="space-y-3">
