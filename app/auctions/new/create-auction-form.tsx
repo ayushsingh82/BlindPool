@@ -4,13 +4,15 @@ import { useState, useMemo } from "react"
 import { useRouter } from "next/navigation"
 import { cn } from "@/lib/utils"
 import { useAccount, useBlockNumber, useWriteContract, useWaitForTransactionReceipt } from "wagmi"
-import { parseEther, encodeAbiParameters, parseAbiParameters, type Address, decodeEventLog } from "viem"
-import { sepolia } from "wagmi/chains"
+import { parseEther, encodeAbiParameters, parseAbiParameters, type Address, decodeEventLog, formatEther } from "viem"
+import { chainId, networkName } from "@/lib/chain-config"
 import {
   CCA_FACTORY,
   FACTORY_ABI as FACTORY_EVENT_ABI,
   AUCTION_ABI,
   ERC20_ABI,
+  BLIND_POOL_FACTORY_ABI,
+  BLIND_POOL_FACTORY_ADDRESS,
   ethToQ96,
 } from "@/lib/auction-contracts"
 
@@ -98,12 +100,12 @@ function extractAuctionAddress(receipt: { logs: readonly { data: `0x${string}`; 
   return null
 }
 
-type Step = "form" | "funding" | "activating" | "done"
+type Step = "form" | "funding" | "activating" | "blindpool" | "done"
 
 export function CreateAuctionForm() {
   const router = useRouter()
   const { address, isConnected } = useAccount()
-  const { data: currentBlock } = useBlockNumber({ chainId: sepolia.id, watch: true })
+  const { data: currentBlock } = useBlockNumber({ chainId, watch: true })
 
   // User-initiated flag: skipped the minting step
   const [fundingSkipped, setFundingSkipped] = useState(false)
@@ -158,8 +160,40 @@ export function CreateAuctionForm() {
   const { isLoading: isActivateConfirming, isSuccess: isActivateSuccess, error: activateReceiptError } =
     useWaitForTransactionReceipt({ hash: activateTxHash })
 
+  // Step 4: Deploy BlindPool
+  const {
+    data: blindPoolTxHash,
+    writeContract: writeDeployBlindPool,
+    isPending: isDeployingBlindPool,
+    reset: resetBlindPool,
+    error: blindPoolWriteError,
+  } = useWriteContract()
+
+  const { isLoading: isBlindPoolConfirming, isSuccess: isBlindPoolSuccess, data: blindPoolReceipt, error: blindPoolReceiptError } =
+    useWaitForTransactionReceipt({ hash: blindPoolTxHash })
+
+  // Extract BlindPool address from deploy receipt
+  const blindPoolAddress = useMemo(() => {
+    if (!blindPoolReceipt) return null
+    for (const log of blindPoolReceipt.logs) {
+      try {
+        const decoded = decodeEventLog({
+          abi: BLIND_POOL_FACTORY_ABI,
+          data: log.data,
+          topics: log.topics as [`0x${string}`, ...`0x${string}`[]],
+        })
+        if (decoded.eventName === "BlindPoolDeployed" && decoded.args.blindPool) {
+          return decoded.args.blindPool as Address
+        }
+      } catch {
+        // not our event
+      }
+    }
+    return null
+  }, [blindPoolReceipt])
+
   // Combine all hook errors into a single displayable error
-  const hookError = createWriteError || createReceiptError || mintWriteError || mintReceiptError || activateWriteError || activateReceiptError
+  const hookError = createWriteError || createReceiptError || mintWriteError || mintReceiptError || activateWriteError || activateReceiptError || blindPoolWriteError || blindPoolReceiptError
 
   // Derive auction address from receipt (no setState needed)
   const auctionAddress = useMemo(() => extractAuctionAddress(createReceipt), [createReceipt])
@@ -167,10 +201,11 @@ export function CreateAuctionForm() {
   // Derive current step from state
   const step: Step = useMemo(() => {
     if (!auctionAddress) return "form"
-    if (isActivateSuccess) return "done"
+    if (isBlindPoolSuccess) return "done"
+    if (isActivateSuccess) return "blindpool"
     if (isMintSuccess || fundingSkipped) return "activating"
     return "funding"
-  }, [auctionAddress, isActivateSuccess, isMintSuccess, fundingSkipped])
+  }, [auctionAddress, isBlindPoolSuccess, isActivateSuccess, isMintSuccess, fundingSkipped])
 
   const isSubmitting = isCreating || (isCreateConfirming && !hookError)
 
@@ -284,12 +319,24 @@ export function CreateAuctionForm() {
     })
   }
 
+  function handleDeployBlindPool() {
+    if (!auctionAddress || !BLIND_POOL_FACTORY_ADDRESS) return
+    setError(null)
+    writeDeployBlindPool({
+      address: BLIND_POOL_FACTORY_ADDRESS,
+      abi: BLIND_POOL_FACTORY_ABI,
+      functionName: "deployBlindPool",
+      args: [auctionAddress],
+    })
+  }
+
   function handleReset() {
     setFundingSkipped(false)
     setError(null)
     resetCreate()
     resetMint()
     resetActivate()
+    resetBlindPool()
   }
 
   // Step indicators
@@ -297,7 +344,8 @@ export function CreateAuctionForm() {
     { key: "form", label: "1. Create" },
     { key: "funding", label: "2. Fund" },
     { key: "activating", label: "3. Activate" },
-    { key: "done", label: "4. Done" },
+    { key: "blindpool", label: "4. Encrypt" },
+    { key: "done", label: "5. Done" },
   ] as const
 
   const stepIndex = stepLabels.findIndex((s) => s.key === step)
@@ -340,7 +388,7 @@ export function CreateAuctionForm() {
         <form onSubmit={handleCreateAuction} className="space-y-6">
           {currentBlock && (
             <p className="font-mono text-[10px] text-muted-foreground/60">
-              Current Sepolia block: {currentBlock.toString()}
+              Current {networkName} block: {currentBlock.toString()}
             </p>
           )}
 
@@ -377,7 +425,7 @@ export function CreateAuctionForm() {
 
           <div className="border-t border-border/40 pt-6">
             <p className="font-mono text-[10px] uppercase tracking-widest text-accent mb-4">
-              Onchain parameters (Sepolia)
+              Onchain parameters ({networkName})
             </p>
 
             <div className="space-y-5">
@@ -396,7 +444,7 @@ export function CreateAuctionForm() {
                   required
                 />
                 <p className="mt-1 font-mono text-[10px] text-muted-foreground/60">
-                  ERC20 token you deployed on Sepolia
+                  ERC20 token you deployed on {networkName}
                 </p>
               </div>
 
@@ -465,7 +513,7 @@ export function CreateAuctionForm() {
                   ))}
                 </select>
                 <p className="mt-1 font-mono text-[10px] text-muted-foreground/60">
-                  Converted to startBlock / endBlock (~12s per Sepolia block)
+                  Converted to startBlock / endBlock (~12s per block)
                 </p>
               </div>
 
@@ -539,7 +587,7 @@ export function CreateAuctionForm() {
           <div className="mt-8 font-mono text-[10px] text-muted-foreground/70 border border-border/40 px-3 py-2 space-y-1">
             <p>
               <strong>Factory:</strong>{" "}
-              <code className="text-accent/80">{CCA_FACTORY}</code> (Sepolia)
+              <code className="text-accent/80">{CCA_FACTORY}</code> ({networkName})
             </p>
             <p>
               Calls <code>initializeDistribution(token, amount, configData, salt)</code> on the CCA Factory.
@@ -632,14 +680,56 @@ export function CreateAuctionForm() {
         </div>
       )}
 
-      {/* STEP 4: Done */}
+      {/* STEP 4: Deploy BlindPool for encrypted bidding */}
+      {step === "blindpool" && auctionAddress && (
+        <div className="space-y-6">
+          <div className="border border-accent/50 bg-accent/10 px-4 py-3 font-mono text-sm text-accent">
+            Auction activated! Now deploying encrypted bidding.
+          </div>
+
+          <div className="space-y-3">
+            <p className="font-mono text-sm text-foreground">
+              Step 4: Deploy a BlindPool to enable Zama fhEVM encrypted bidding.
+            </p>
+            <p className="font-mono text-[10px] text-muted-foreground break-all">
+              Auction: <code className="text-accent/80">{auctionAddress}</code>
+            </p>
+            <p className="font-mono text-[10px] text-muted-foreground/60">
+              This calls <code>BlindPoolFactory.deployBlindPool(auction)</code>. All bids will be encrypted on-chain until the reveal phase.
+            </p>
+          </div>
+
+          <button
+            type="button"
+            onClick={handleDeployBlindPool}
+            disabled={isDeployingBlindPool || isBlindPoolConfirming}
+            className={cn(
+              "border border-purple-500/40 px-6 py-3 font-mono text-xs uppercase tracking-widest text-purple-400",
+              "hover:bg-purple-500/10 transition-colors disabled:opacity-50 disabled:pointer-events-none",
+            )}
+          >
+            {isDeployingBlindPool
+              ? "Confirm in wallet..."
+              : isBlindPoolConfirming
+                ? "Deploying BlindPool..."
+                : "Deploy BlindPool"}
+          </button>
+        </div>
+      )}
+
+      {/* STEP 5: Done */}
       {step === "done" && auctionAddress && (
         <div className="space-y-6">
           <div className="border border-accent/50 bg-accent/10 px-4 py-3 font-mono text-sm text-accent space-y-2">
-            <p>Auction is live and accepting bids!</p>
+            <p>Auction is live with encrypted bidding!</p>
             <p className="text-[10px] text-muted-foreground break-all">
-              Address: <code className="text-accent/80">{auctionAddress}</code>
+              Auction: <code className="text-accent/80">{auctionAddress}</code>
             </p>
+            {blindPoolAddress && (
+              <p className="text-[10px] text-purple-400 break-all">
+                BlindPool: <code>{blindPoolAddress}</code>
+              </p>
+            )}
           </div>
 
           <div className="flex items-center gap-4">

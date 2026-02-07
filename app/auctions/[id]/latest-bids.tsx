@@ -2,9 +2,9 @@
 
 import { useEffect, useState } from "react"
 import { usePublicClient } from "wagmi"
-import { sepolia } from "wagmi/chains"
 import { formatEther, type Address } from "viem"
-import { BID_SUBMITTED_EVENT, q96ToEth } from "@/lib/auction-contracts"
+import { BID_SUBMITTED_EVENT, BLIND_POOL_ABI, q96ToEth } from "@/lib/auction-contracts"
+import { chainId, blockExplorerUrl } from "@/lib/chain-config"
 
 export interface BidRow {
   id: bigint
@@ -12,6 +12,7 @@ export interface BidRow {
   price: bigint
   amount: bigint
   blockNumber: bigint
+  encrypted?: boolean
 }
 
 function formatTimeAgo(blocksAgo: number): string {
@@ -26,18 +27,28 @@ function shortAddress(addr: Address): string {
   return `${addr.slice(0, 6)}…${addr.slice(-4)}`
 }
 
-const SEPOLIA_ETHERSCAN = "https://sepolia.etherscan.io"
+// BlindBidPlaced event from BlindPoolCCA
+const BLIND_BID_PLACED_EVENT = {
+  type: "event",
+  name: "BlindBidPlaced",
+  inputs: [
+    { name: "blindBidId", type: "uint256", indexed: true },
+    { name: "bidder", type: "address", indexed: true },
+  ],
+} as const
 
 export function LatestBids({
   auctionAddress,
   startBlock,
   currentBlock,
+  blindPoolAddress,
 }: {
   auctionAddress: Address
   startBlock: bigint
   currentBlock: bigint | undefined
+  blindPoolAddress?: Address
 }) {
-  const publicClient = usePublicClient({ chainId: sepolia.id })
+  const publicClient = usePublicClient({ chainId })
   const [bids, setBids] = useState<BidRow[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -50,22 +61,61 @@ export function LatestBids({
       try {
         setLoading(true)
         setError(null)
-        const logs = await publicClient!.getLogs({
-          address: auctionAddress,
-          event: BID_SUBMITTED_EVENT,
-          fromBlock: startBlock,
-          toBlock: "latest",
-        })
+
+        const allRows: BidRow[] = []
+
+        // Fetch CCA BidSubmitted events (plain bids)
+        const CHUNK = BigInt(9000)
+        const latestBlock = await publicClient!.getBlockNumber()
+        let from = startBlock
+        while (from <= latestBlock) {
+          const to = from + CHUNK - BigInt(1) > latestBlock ? latestBlock : from + CHUNK - BigInt(1)
+          const logs = await publicClient!.getLogs({
+            address: auctionAddress,
+            event: BID_SUBMITTED_EVENT,
+            fromBlock: from,
+            toBlock: to,
+          })
+          for (const log of logs) {
+            allRows.push({
+              id: (log.args as { id: bigint }).id,
+              owner: (log.args as { owner: Address }).owner,
+              price: (log.args as { price: bigint }).price,
+              amount: (log.args as { amount: bigint }).amount,
+              blockNumber: log.blockNumber ?? BigInt(0),
+            })
+          }
+          from = to + BigInt(1)
+        }
+
+        // Fetch BlindPool BlindBidPlaced events (encrypted bids)
+        if (blindPoolAddress) {
+          from = startBlock
+          while (from <= latestBlock) {
+            const to = from + CHUNK - BigInt(1) > latestBlock ? latestBlock : from + CHUNK - BigInt(1)
+            const blindLogs = await publicClient!.getLogs({
+              address: blindPoolAddress,
+              event: BLIND_BID_PLACED_EVENT,
+              fromBlock: from,
+              toBlock: to,
+            })
+            for (const log of blindLogs) {
+              allRows.push({
+                id: (log.args as { blindBidId: bigint }).blindBidId,
+                owner: (log.args as { bidder: Address }).bidder,
+                price: BigInt(0), // encrypted — not visible
+                amount: BigInt(0), // encrypted — not visible
+                blockNumber: log.blockNumber ?? BigInt(0),
+                encrypted: true,
+              })
+            }
+            from = to + BigInt(1)
+          }
+        }
+
         if (cancelled) return
-        const rows: BidRow[] = logs.map((log) => ({
-          id: (log.args as { id: bigint }).id,
-          owner: (log.args as { owner: Address }).owner,
-          price: (log.args as { price: bigint }).price,
-          amount: (log.args as { amount: bigint }).amount,
-          blockNumber: log.blockNumber ?? BigInt(0),
-        }))
-        rows.sort((a, b) => Number(b.blockNumber - a.blockNumber))
-        setBids(rows.slice(0, 5))
+        allRows.sort((a, b) => Number(b.blockNumber - a.blockNumber))
+        setBids(allRows.slice(0, 10))
       } catch (err) {
         if (!cancelled) setError(err instanceof Error ? err.message : "Failed to load bids")
       } finally {
@@ -75,7 +125,7 @@ export function LatestBids({
 
     fetchBids()
     return () => { cancelled = true }
-  }, [publicClient, auctionAddress, startBlock])
+  }, [publicClient, auctionAddress, startBlock, blindPoolAddress])
 
   if (loading) {
     return (
@@ -107,29 +157,41 @@ export function LatestBids({
         <thead>
           <tr className="border-b border-border/40 text-[10px] uppercase tracking-widest text-muted-foreground text-left">
             <th className="py-2 px-3">Wallet</th>
-            <th className="py-2 px-3">Amount (ETH)</th>
-            <th className="py-2 px-3">Max price (ETH)</th>
+            <th className="py-2 px-3">Amount</th>
+            <th className="py-2 px-3">Max price</th>
             <th className="py-2 px-3">Time</th>
           </tr>
         </thead>
         <tbody>
           {bids.map((bid) => (
-            <tr key={`${bid.blockNumber}-${bid.id}`} className="border-b border-border/30 hover:bg-muted/20">
+            <tr key={`${bid.blockNumber}-${bid.id}-${bid.encrypted ? "enc" : "plain"}`} className="border-b border-border/30 hover:bg-muted/20">
               <td className="py-2 px-3">
-                <a
-                  href={`${SEPOLIA_ETHERSCAN}/address/${bid.owner}`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-accent hover:underline break-all"
-                >
-                  {shortAddress(bid.owner)}
-                </a>
+                {blockExplorerUrl ? (
+                  <a
+                    href={`${blockExplorerUrl}/address/${bid.owner}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-accent hover:underline break-all"
+                  >
+                    {shortAddress(bid.owner)}
+                  </a>
+                ) : (
+                  <span className="text-accent break-all">{shortAddress(bid.owner)}</span>
+                )}
               </td>
               <td className="py-2 px-3 text-foreground">
-                {parseFloat(formatEther(bid.amount)).toFixed(6)}
+                {bid.encrypted ? (
+                  <span className="text-purple-400 text-[10px]">encrypted</span>
+                ) : (
+                  `${parseFloat(formatEther(bid.amount)).toFixed(6)} ETH`
+                )}
               </td>
               <td className="py-2 px-3 text-foreground">
-                {q96ToEth(bid.price)}
+                {bid.encrypted ? (
+                  <span className="text-purple-400 text-[10px]">encrypted</span>
+                ) : (
+                  `${q96ToEth(bid.price)} ETH`
+                )}
               </td>
               <td className="py-2 px-3 text-muted-foreground">
                 {currentBlock
@@ -141,15 +203,20 @@ export function LatestBids({
         </tbody>
       </table>
       <p className="mt-2 font-mono text-[10px] text-muted-foreground/70">
-        Latest 5 bids ·{" "}
-        <a
-          href={`${SEPOLIA_ETHERSCAN}/address/${auctionAddress}#events`}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="text-accent/80 hover:underline"
-        >
-          View all on Etherscan
-        </a>
+        Latest bids
+        {blockExplorerUrl && (
+          <>
+            {" · "}
+            <a
+              href={`${blockExplorerUrl}/address/${auctionAddress}#events`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-accent/80 hover:underline"
+            >
+              View all on Etherscan
+            </a>
+          </>
+        )}
       </p>
     </div>
   )

@@ -3,9 +3,9 @@
 import { useState, useEffect } from "react"
 import { cn } from "@/lib/utils"
 import { useAccount, usePublicClient, useWriteContract, useWaitForTransactionReceipt } from "wagmi"
-import { sepolia } from "wagmi/chains"
 import { parseEther, type Address } from "viem"
-import { AUCTION_ABI, ethToQ96, snapToTickBoundary } from "@/lib/auction-contracts"
+import { AUCTION_ABI, BLIND_POOL_ABI, MOCK_BLIND_BID_ABI, ethToQ96, snapToTickBoundary } from "@/lib/auction-contracts"
+import { IS_ANVIL, chainId } from "@/lib/chain-config"
 
 const inputClass = cn(
   "mt-2 w-full border border-border bg-input/50 px-4 py-3 font-mono text-sm",
@@ -22,6 +22,7 @@ export function PlaceBidForm({
   clearingPriceRaw,
   totalSupply,
   tickSpacing,
+  blindPoolAddress,
   onBidSuccess,
 }: {
   auctionId: string
@@ -32,13 +33,15 @@ export function PlaceBidForm({
   clearingPriceRaw: bigint
   totalSupply?: string
   tickSpacing: bigint
+  blindPoolAddress?: Address
   onBidSuccess?: () => void
 }) {
   const { address, isConnected } = useAccount()
-  const publicClient = usePublicClient({ chainId: sepolia.id })
+  const publicClient = usePublicClient({ chainId })
   const [amount, setAmount] = useState("")
   const [maxPrice, setMaxPrice] = useState("")
   const [error, setError] = useState<string | null>(null)
+  const [encrypting, setEncrypting] = useState(false)
   const [simulating, setSimulating] = useState(false)
 
   const { data: txHash, writeContract, isPending: isWriting, reset: resetWrite, error: writeError } = useWriteContract()
@@ -48,7 +51,9 @@ export function PlaceBidForm({
   })
 
   const hookError = writeError || receiptError
-  const submitted = simulating || isWriting || (isConfirming && !hookError)
+  const submitted = encrypting || simulating || isWriting || (isConfirming && !hookError)
+
+  const isEncrypted = !!blindPoolAddress
 
   useEffect(() => {
     if (isSuccess && onBidSuccess) onBidSuccess()
@@ -85,23 +90,91 @@ export function PlaceBidForm({
     }
 
     const amountWei = parseEther(amount)
-    const rawQ96 = ethToQ96(maxPrice)
 
+    // ── Encrypted path: BlindPool ──
+    console.log("[Bid] isEncrypted:", isEncrypted, "blindPoolAddress:", blindPoolAddress)
+    if (isEncrypted && blindPoolAddress) {
+      // BlindPoolCCA uses euint64 (Zama's max encrypted int), so values must fit uint64.
+      // Q96 prices are too large (~2^96 scale), so we use a scaled-down format:
+      //   blindPrice = priceInEth * 1e8  (8 decimal places of precision)
+      // The forwardBidToCCA step converts this back to Q96 for the real CCA.
+      const BLIND_PRICE_SCALE = BigInt(1e8)
+      const priceFloat = parseFloat(maxPrice)
+      if (!Number.isFinite(priceFloat) || priceFloat <= 0) {
+        setError("Max price must be a positive number.")
+        return
+      }
+      // Scale: multiply by 1e8, truncate to integer
+      const scaledPrice = BigInt(Math.round(priceFloat * 1e8))
+      if (scaledPrice === BigInt(0)) {
+        setError("Max price is too small to encode.")
+        return
+      }
+
+      const MAX_UINT64 = BigInt("18446744073709551615")
+      if (scaledPrice > MAX_UINT64) {
+        setError("Max price too large for encrypted bid (must fit uint64).")
+        return
+      }
+      if (amountWei > MAX_UINT64) {
+        setError("Amount too large for encrypted bid (must fit uint64).")
+        return
+      }
+
+      // On Anvil: use mockSubmitBlindBid (no Zama encryption)
+      if (IS_ANVIL) {
+        writeContract({
+          address: blindPoolAddress,
+          abi: MOCK_BLIND_BID_ABI,
+          functionName: "mockSubmitBlindBid",
+          args: [scaledPrice, amountWei],
+          value: amountWei,
+        })
+        return
+      }
+
+      // On Sepolia: encrypt with Zama SDK then call submitBlindBid
+      setEncrypting(true)
+      try {
+        const { encryptBidInputs } = await import("@/lib/zama")
+        const { handles, inputProof } = await encryptBidInputs(
+          blindPoolAddress,
+          address,
+          scaledPrice,
+          amountWei,
+        )
+
+        setEncrypting(false)
+
+        writeContract({
+          address: blindPoolAddress,
+          abi: BLIND_POOL_ABI,
+          functionName: "submitBlindBid",
+          args: [handles[0], handles[1], inputProof],
+          value: amountWei, // ETH escrow
+        })
+      } catch (err: unknown) {
+        setEncrypting(false)
+        const msg = err instanceof Error ? err.message : String(err)
+        setError(`Encryption failed: ${msg}`)
+      }
+      return
+    }
+
+    // ── Plain path: direct CCA bid ──
+    const rawQ96 = ethToQ96(maxPrice)
     if (rawQ96 === BigInt(0)) {
       setError("Max price is too small to encode.")
       return
     }
 
-    // Snap to nearest valid tick boundary (round UP)
     const maxPriceQ96 = snapToTickBoundary(rawQ96, tickSpacing)
 
-    // Must be strictly above clearing price
     if (clearingPriceRaw > BigInt(0) && maxPriceQ96 <= clearingPriceRaw) {
       setError(`Max price must be strictly above the clearing price (${clearingPrice} ETH).`)
       return
     }
 
-    // Must be at or above floor price
     if (floorPriceRaw > BigInt(0) && maxPriceQ96 < floorPriceRaw) {
       setError(`Max price must be at or above the floor price (${floorPrice} ETH).`)
       return
@@ -111,19 +184,10 @@ export function PlaceBidForm({
       maxPriceQ96,
       amountWei,
       address,
-      floorPriceRaw, // prevTickPrice hint
+      floorPriceRaw,
       "0x" as `0x${string}`,
     ] as const
 
-    console.log("submitBid params:", {
-      auction: auctionId,
-      maxPrice: maxPriceQ96.toString(),
-      amount: amountWei.toString(),
-      owner: address,
-      prevTickPrice: floorPriceRaw.toString(),
-    })
-
-    // Pre-flight simulation to get actual revert reason
     setSimulating(true)
     try {
       await publicClient.simulateContract({
@@ -137,7 +201,6 @@ export function PlaceBidForm({
     } catch (simErr: unknown) {
       setSimulating(false)
       const msg = simErr instanceof Error ? simErr.message : String(simErr)
-      // Extract the short/useful part of the error
       const shortMatch = msg.match(/reverted with the following reason:\s*(.+?)(?:\n|$)/i)
       const customMatch = msg.match(/reverted with custom error\s*["']?(\w+)\(?\)?/i)
       const reason = customMatch?.[1] || shortMatch?.[1] || msg
@@ -146,7 +209,6 @@ export function PlaceBidForm({
     }
     setSimulating(false)
 
-    // Simulation passed — submit for real
     writeContract({
       address: auctionId as Address,
       abi: AUCTION_ABI,
@@ -158,6 +220,14 @@ export function PlaceBidForm({
 
   return (
     <form onSubmit={handleSubmit} className="mt-6 max-w-sm space-y-5">
+      {isEncrypted && (
+        <div className="border border-accent/50 bg-accent/10 px-4 py-3 font-mono text-[10px] text-accent">
+          {IS_ANVIL
+            ? "Anvil mode: bids use mockSubmitBlindBid (no encryption). Values are trivially encrypted on-chain."
+            : "Bids are encrypted with Zama fhEVM. Your price and amount are hidden on-chain until reveal."}
+        </div>
+      )}
+
       {(error || hookError) && (
         <div
           role="alert"
@@ -174,10 +244,12 @@ export function PlaceBidForm({
           role="status"
           className="border border-accent/50 bg-accent/10 px-4 py-3 font-mono text-sm text-accent"
         >
-          Bid placed! Tx: {txHash?.slice(0, 10)}...
+          {isEncrypted ? "Encrypted bid placed!" : "Bid placed!"} Tx: {txHash?.slice(0, 10)}...
           <br />
           <span className="text-[10px] text-muted-foreground">
-            You will receive {tokenSymbol} at the clearing price when the auction ends.
+            {isEncrypted
+              ? "Your bid is sealed on-chain. It will be revealed after the blind bid deadline."
+              : `You will receive ${tokenSymbol} at the clearing price when the auction ends.`}
           </span>
           <div className="mt-3">
             <button
@@ -196,7 +268,7 @@ export function PlaceBidForm({
         </div>
       )}
 
-      {isUnfunded && (
+      {isUnfunded && !isEncrypted && (
         <div
           role="alert"
           className="border border-yellow-500/50 bg-yellow-500/10 px-4 py-3 font-mono text-sm text-yellow-600"
@@ -207,12 +279,14 @@ export function PlaceBidForm({
       )}
 
       {/* Current prices */}
-      <div className="font-mono text-[10px] text-muted-foreground/70 space-y-1">
-        {floorPrice && <p>Floor price: <span className="text-foreground">{floorPrice} ETH</span></p>}
-        {clearingPrice && clearingPrice !== "0" && (
-          <p>Clearing price: <span className="text-foreground">{clearingPrice} ETH</span> — bid must be <strong>above</strong> this</p>
-        )}
-      </div>
+      {!isEncrypted && (
+        <div className="font-mono text-[10px] text-muted-foreground/70 space-y-1">
+          {floorPrice && <p>Floor price: <span className="text-foreground">{floorPrice} ETH</span></p>}
+          {clearingPrice && clearingPrice !== "0" && (
+            <p>Clearing price: <span className="text-foreground">{clearingPrice} ETH</span> — bid must be <strong>above</strong> this</p>
+          )}
+        </div>
+      )}
 
       <div>
         <label htmlFor="maxPrice" className={labelClass}>
@@ -230,7 +304,9 @@ export function PlaceBidForm({
           required
         />
         <p className="mt-1 font-mono text-[10px] text-muted-foreground/60">
-          Must be strictly above the current clearing price (Q96 encoded onchain).
+          {isEncrypted
+            ? "Encrypted on-chain (scaled to fit uint64, converted to Q96 at reveal)."
+            : "Must be strictly above the current clearing price (Q96 encoded onchain)."}
         </p>
       </div>
 
@@ -250,7 +326,9 @@ export function PlaceBidForm({
           required
         />
         <p className="mt-1 font-mono text-[10px] text-muted-foreground/60">
-          ETH to commit. Sent as msg.value with the bid.
+          {isEncrypted
+            ? "ETH escrow sent with the bid. Excess refunded after reveal + forward."
+            : "ETH to commit. Sent as msg.value with the bid."}
         </p>
       </div>
 
@@ -263,27 +341,49 @@ export function PlaceBidForm({
           "hover:border-accent hover:text-accent transition-all duration-200 disabled:opacity-50 disabled:pointer-events-none",
         )}
       >
-        {simulating
-          ? "Simulating..."
-          : isWriting
-            ? "Confirm in wallet..."
-            : isConfirming && !hookError
-              ? "Confirming..."
-              : isSuccess
-                ? "Bid placed"
-                : hookError
-                  ? "Try again"
-                  : "Submit bid"}
+        {encrypting
+          ? "Encrypting bid..."
+          : simulating
+            ? "Simulating..."
+            : isWriting
+              ? "Confirm in wallet..."
+              : isConfirming && !hookError
+                ? "Confirming..."
+                : isSuccess
+                  ? "Bid placed"
+                  : hookError
+                    ? "Try again"
+                    : isEncrypted
+                      ? IS_ANVIL
+                        ? "Submit mock blind bid"
+                        : "Submit encrypted bid"
+                      : "Submit bid"}
       </button>
 
       <div className="mt-4 font-mono text-[10px] text-muted-foreground/70 border border-border/40 px-3 py-2 space-y-1">
-        <p>
-          Calls <code>submitBid(maxPrice, amount, owner, prevTickPrice, hookData)</code> on the auction
-          with <code>msg.value = amount</code>.
-        </p>
-        <p>
-          Auction: <code className="text-accent/80 break-all">{auctionId}</code>
-        </p>
+        {isEncrypted ? (
+          <>
+            <p>
+              {IS_ANVIL
+                ? <>Calls <code>mockSubmitBlindBid(maxPrice, amount)</code> on the BlindPool with <code>msg.value = amount</code>.</>
+                : <>Calls <code>submitBlindBid(encMaxPrice, encAmount, inputProof)</code> on the BlindPool with <code>msg.value = amount</code>.</>
+              }
+            </p>
+            <p>
+              BlindPool: <code className="text-accent/80 break-all">{blindPoolAddress}</code>
+            </p>
+          </>
+        ) : (
+          <>
+            <p>
+              Calls <code>submitBid(maxPrice, amount, owner, prevTickPrice, hookData)</code> on the auction
+              with <code>msg.value = amount</code>.
+            </p>
+            <p>
+              Auction: <code className="text-accent/80 break-all">{auctionId}</code>
+            </p>
+          </>
+        )}
       </div>
     </form>
   )

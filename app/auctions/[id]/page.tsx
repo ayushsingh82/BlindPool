@@ -2,21 +2,27 @@
 
 import Link from "next/link"
 import { useParams } from "next/navigation"
-import { usePublicClient, useBlockNumber } from "wagmi"
-import { sepolia } from "wagmi/chains"
+import { useAccount, usePublicClient, useBlockNumber } from "wagmi"
 import { formatEther, type Address } from "viem"
 import { useEffect, useState, useCallback, useRef, useMemo } from "react"
 import { PlaceBidForm } from "./place-bid-form"
 import { LatestBids } from "./latest-bids"
 import { cn } from "@/lib/utils"
+import { chainId, networkName } from "@/lib/chain-config"
 import {
   CCA_FACTORY,
   FACTORY_DEPLOY_BLOCK,
   FACTORY_ABI,
   AUCTION_ABI,
+  BLIND_POOL_ABI,
+  BLIND_POOL_FACTORY_ABI,
+  BLIND_POOL_FACTORY_ADDRESS,
+  BLIND_POOL_OVERRIDE,
   q96ToEth,
   type AuctionStatus,
 } from "@/lib/auction-contracts"
+
+// Note: BLIND_POOL_FACTORY_ABI kept for event log parsing in findExistingBlindPool
 
 function statusLabel(s: AuctionStatus) {
   switch (s) {
@@ -54,10 +60,11 @@ interface AuctionData {
 export default function AuctionDetailPage() {
   const params = useParams()
   const auctionAddress = params.id as Address
-  const publicClient = usePublicClient({ chainId: sepolia.id })
+  const { isConnected } = useAccount()
+  const publicClient = usePublicClient({ chainId })
 
   // Watch block ONLY for countdown display — NOT used in any useEffect deps
-  const { data: currentBlock } = useBlockNumber({ chainId: sepolia.id, watch: true })
+  const { data: currentBlock } = useBlockNumber({ chainId, watch: true })
 
   const [auction, setAuction] = useState<AuctionData | null>(null)
   const [loading, setLoading] = useState(true)
@@ -65,6 +72,84 @@ export default function AuctionDetailPage() {
   const [bidsRefreshKey, setBidsRefreshKey] = useState(0)
   const fetchedRef = useRef(false)
   const handleBidSuccess = useCallback(() => setBidsRefreshKey((k) => k + 1), [])
+
+  // ── BlindPool state ──
+  const [blindPoolAddress, setBlindPoolAddress] = useState<Address | null>(
+    BLIND_POOL_OVERRIDE || null
+  )
+  const [blindPoolLoading, setBlindPoolLoading] = useState(false)
+  const [blindPoolDeadline, setBlindPoolDeadline] = useState<bigint | null>(null)
+  const [blindPoolBidCount, setBlindPoolBidCount] = useState<number | null>(null)
+  const [blindPoolRevealed, setBlindPoolRevealed] = useState(false)
+
+
+  // Look for existing BlindPool from factory events (skip if override is set)
+  useEffect(() => {
+    if (!publicClient || !BLIND_POOL_FACTORY_ADDRESS || blindPoolAddress) return
+
+    async function findExistingBlindPool() {
+      if (!publicClient) return
+      setBlindPoolLoading(true)
+      try {
+        const latestBlock = await publicClient.getBlockNumber()
+        // Search backwards from latest in 9000-block chunks (RPC limit is 10k)
+        const CHUNK = BigInt(9000)
+        let to = latestBlock
+        const minBlock = FACTORY_DEPLOY_BLOCK
+        while (to >= minBlock) {
+          const from = to - CHUNK + BigInt(1) < minBlock ? minBlock : to - CHUNK + BigInt(1)
+          const logs = await publicClient.getLogs({
+            address: BLIND_POOL_FACTORY_ADDRESS,
+            event: BLIND_POOL_FACTORY_ABI[1], // BlindPoolDeployed event
+            args: { cca: auctionAddress },
+            fromBlock: from,
+            toBlock: to,
+          })
+          if (logs.length > 0) {
+            const latest = logs[logs.length - 1]
+            const addr = latest.args.blindPool as Address
+            console.log("[BlindPool] Found:", addr, "for CCA:", auctionAddress)
+            setBlindPoolAddress(addr)
+            if (latest.args.blindBidDeadline) {
+              setBlindPoolDeadline(BigInt(latest.args.blindBidDeadline))
+            }
+            return
+          }
+          to = from - BigInt(1)
+        }
+        console.log("[BlindPool] No BlindPool found for CCA:", auctionAddress)
+      } catch (err) {
+        console.error("[BlindPool] Search error:", err)
+      } finally {
+        setBlindPoolLoading(false)
+      }
+    }
+    findExistingBlindPool()
+  }, [publicClient, auctionAddress, blindPoolAddress])
+
+  // Fetch BlindPool metadata when we have an address (re-runs on bidsRefreshKey to update count)
+  useEffect(() => {
+    if (!publicClient || !blindPoolAddress) return
+
+    async function fetchBlindPoolData() {
+      if (!publicClient || !blindPoolAddress) return
+      try {
+        const results = await publicClient.multicall({
+          contracts: [
+            { address: blindPoolAddress, abi: BLIND_POOL_ABI, functionName: "blindBidDeadline" },
+            { address: blindPoolAddress, abi: BLIND_POOL_ABI, functionName: "nextBlindBidId" },
+            { address: blindPoolAddress, abi: BLIND_POOL_ABI, functionName: "revealed" },
+          ],
+        })
+        if (results[0].result !== undefined) setBlindPoolDeadline(BigInt(results[0].result as bigint))
+        if (results[1].result !== undefined) setBlindPoolBidCount(Number(results[1].result))
+        if (results[2].result !== undefined) setBlindPoolRevealed(results[2].result as boolean)
+      } catch {
+        // BlindPool may not be fully deployed yet
+      }
+    }
+    fetchBlindPoolData()
+  }, [publicClient, blindPoolAddress, bidsRefreshKey])
 
   const fetchAuction = useCallback(async () => {
     if (!publicClient) return
@@ -150,14 +235,17 @@ export default function AuctionDetailPage() {
     return s
   }, [auction, currentBlock])
 
-  // Always show bid form if status is or was active — never unmount mid-interaction
+  // Can bid if auction is active AND (no blind pool, or blind pool deadline not passed)
+  const blindBidOpen = blindPoolAddress && blindPoolDeadline && currentBlock
+    ? currentBlock < blindPoolDeadline
+    : true
   const canBid = status === "active"
 
   if (loading) {
     return (
       <div className="px-6 md:px-12 py-12 md:py-20">
         <p className="font-mono text-sm text-muted-foreground animate-pulse">
-          Loading auction from Sepolia...
+          Loading auction from {networkName}...
         </p>
       </div>
     )
@@ -192,55 +280,128 @@ export default function AuctionDetailPage() {
           )}>
             {statusLabel(status)}
           </span>
+          {blindPoolAddress && (
+            <span className="font-mono text-[10px] uppercase tracking-widest px-2 py-1 border border-purple-500/60 text-purple-400">
+              Encrypted
+            </span>
+          )}
         </div>
-        <p className="mt-2 font-mono text-xs text-muted-foreground break-all">{auction.address}</p>
+        <p className="mt-2 font-mono text-xs text-muted-foreground break-all">
+          {blindPoolAddress ?? auction.address}
+        </p>
         <p className="mt-1 font-mono text-[10px] text-muted-foreground/60">
-          Token {auction.token.slice(0, 6)}…{auction.token.slice(-4)} · Sepolia
+          Token {auction.token.slice(0, 6)}...{auction.token.slice(-4)} · {networkName}
+          {blindPoolAddress && <> · Powered by <span className="text-purple-400">Zama fhEVM</span></>}
         </p>
 
         <dl className="mt-10 grid grid-cols-2 md:grid-cols-4 gap-6 font-mono text-sm">
-          <div>
-            <dt className="text-[10px] uppercase tracking-widest text-muted-foreground/70">Clearing price</dt>
-            <dd className="mt-1 text-foreground">{auction.clearingPrice} ETH</dd>
-          </div>
-          <div>
-            <dt className="text-[10px] uppercase tracking-widest text-muted-foreground/70">Floor price</dt>
-            <dd className="mt-1 text-foreground">{auction.floorPrice} ETH</dd>
-          </div>
-          <div>
-            <dt className="text-[10px] uppercase tracking-widest text-muted-foreground/70">Bids</dt>
-            <dd className="mt-1 text-foreground">{auction.bidCount}</dd>
-          </div>
-          <div>
-            <dt className="text-[10px] uppercase tracking-widest text-muted-foreground/70">Raised</dt>
-            <dd className="mt-1 text-foreground">{parseFloat(auction.currencyRaised).toFixed(4)} ETH</dd>
-          </div>
-          <div>
-            <dt className="text-[10px] uppercase tracking-widest text-muted-foreground/70">Total supply</dt>
-            <dd className="mt-1 text-foreground">{parseFloat(auction.totalSupply).toLocaleString()} tokens</dd>
-          </div>
-          <div>
-            <dt className="text-[10px] uppercase tracking-widest text-muted-foreground/70">Blocks</dt>
-            <dd className="mt-1 text-foreground text-[10px]">{auction.startBlock.toString()} → {auction.endBlock.toString()}</dd>
-          </div>
-          <div>
-            <dt className="text-[10px] uppercase tracking-widest text-muted-foreground/70">{status === "ended" ? "Ended" : "Ends in"}</dt>
-            <dd className="mt-1 text-foreground">
-              {status === "ended"
-                ? "Closed"
-                : currentBlock
-                  ? `~${blocksToTime(auction.endBlock - currentBlock)}`
-                  : "—"}
-            </dd>
-          </div>
+          {blindPoolAddress ? (
+            <>
+              <div>
+                <dt className="text-[10px] uppercase tracking-widest text-muted-foreground/70">Floor price</dt>
+                <dd className="mt-1 text-foreground">{auction.floorPrice} ETH</dd>
+              </div>
+              <div>
+                <dt className="text-[10px] uppercase tracking-widest text-muted-foreground/70">Clearing price</dt>
+                <dd className="mt-1 text-purple-400 text-[10px]">hidden until reveal</dd>
+              </div>
+              <div>
+                <dt className="text-[10px] uppercase tracking-widest text-muted-foreground/70">Encrypted bids</dt>
+                <dd className="mt-1 text-foreground">{blindPoolBidCount ?? 0}</dd>
+              </div>
+              <div>
+                <dt className="text-[10px] uppercase tracking-widest text-muted-foreground/70">Total supply</dt>
+                <dd className="mt-1 text-foreground">{parseFloat(auction.totalSupply).toLocaleString()} tokens</dd>
+              </div>
+              <div>
+                <dt className="text-[10px] uppercase tracking-widest text-muted-foreground/70">Bid deadline</dt>
+                <dd className="mt-1 text-foreground">
+                  {blindPoolDeadline && currentBlock
+                    ? currentBlock < blindPoolDeadline
+                      ? `~${blocksToTime(blindPoolDeadline - currentBlock)}`
+                      : "Closed"
+                    : "\u2014"}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-[10px] uppercase tracking-widest text-muted-foreground/70">{status === "ended" ? "Ended" : "Auction ends"}</dt>
+                <dd className="mt-1 text-foreground">
+                  {status === "ended"
+                    ? "Closed"
+                    : currentBlock
+                      ? `~${blocksToTime(auction.endBlock - currentBlock)}`
+                      : "\u2014"}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-[10px] uppercase tracking-widest text-muted-foreground/70">Phase</dt>
+                <dd className="mt-1 text-foreground text-[10px]">
+                  {blindPoolRevealed
+                    ? "Revealed — forwarding to CCA"
+                    : blindPoolDeadline && currentBlock && currentBlock >= blindPoolDeadline
+                      ? "Bidding closed — awaiting reveal"
+                      : "Accepting encrypted bids"}
+                </dd>
+              </div>
+            </>
+          ) : (
+            <>
+              <div>
+                <dt className="text-[10px] uppercase tracking-widest text-muted-foreground/70">Clearing price</dt>
+                <dd className="mt-1 text-foreground">{auction.clearingPrice} ETH</dd>
+              </div>
+              <div>
+                <dt className="text-[10px] uppercase tracking-widest text-muted-foreground/70">Floor price</dt>
+                <dd className="mt-1 text-foreground">{auction.floorPrice} ETH</dd>
+              </div>
+              <div>
+                <dt className="text-[10px] uppercase tracking-widest text-muted-foreground/70">Bids</dt>
+                <dd className="mt-1 text-foreground">{auction.bidCount}</dd>
+              </div>
+              <div>
+                <dt className="text-[10px] uppercase tracking-widest text-muted-foreground/70">Raised</dt>
+                <dd className="mt-1 text-foreground">{parseFloat(auction.currencyRaised).toFixed(4)} ETH</dd>
+              </div>
+              <div>
+                <dt className="text-[10px] uppercase tracking-widest text-muted-foreground/70">Total supply</dt>
+                <dd className="mt-1 text-foreground">{parseFloat(auction.totalSupply).toLocaleString()} tokens</dd>
+              </div>
+              <div>
+                <dt className="text-[10px] uppercase tracking-widest text-muted-foreground/70">{status === "ended" ? "Ended" : "Ends in"}</dt>
+                <dd className="mt-1 text-foreground">
+                  {status === "ended"
+                    ? "Closed"
+                    : currentBlock
+                      ? `~${blocksToTime(auction.endBlock - currentBlock)}`
+                      : "\u2014"}
+                </dd>
+              </div>
+            </>
+          )}
         </dl>
+
+        {/* ── Encryption info ── */}
+        {blindPoolAddress && (
+          <div className="mt-8 border border-purple-500/30 bg-purple-500/5 p-4 font-mono text-[10px] text-muted-foreground space-y-1">
+            <p className="text-purple-400 uppercase tracking-widest">Zama fhEVM encrypted auction</p>
+            <p>All bids are encrypted on-chain. Price and amount are hidden until the reveal phase.</p>
+            <p>After the bid deadline, bids are decrypted and forwarded to the CCA for settlement.</p>
+          </div>
+        )}
+
 
         {canBid && (
           <div className="mt-14 pt-10 border-t border-border/40">
             <div className="grid grid-cols-1 md:grid-cols-[1fr,minmax(280px,380px)] gap-8 md:gap-12 items-start">
               <div className="min-w-0">
-                <h2 className="font-[var(--font-bebas)] text-2xl md:text-3xl tracking-tight">Place sealed bid</h2>
-                <p className="mt-2 font-mono text-xs text-muted-foreground">Your bid is confidential until the auction closes.</p>
+                <h2 className="font-[var(--font-bebas)] text-2xl md:text-3xl tracking-tight">
+                  {blindPoolAddress ? "Place encrypted bid" : "Place sealed bid"}
+                </h2>
+                <p className="mt-2 font-mono text-xs text-muted-foreground">
+                  {blindPoolAddress
+                    ? "Your bid is encrypted with Zama fhEVM. Price and amount are hidden until the reveal phase."
+                    : "Your bid is confidential until the auction closes."}
+                </p>
                 <PlaceBidForm
                   auctionId={auction.address}
                   tokenSymbol={`CCA${auction.auctionNumber}`}
@@ -250,6 +411,7 @@ export default function AuctionDetailPage() {
                   clearingPriceRaw={auction.clearingPriceRaw}
                   totalSupply={auction.totalSupply}
                   tickSpacing={auction.tickSpacing}
+                  blindPoolAddress={blindPoolAddress ?? undefined}
                   onBidSuccess={handleBidSuccess}
                 />
               </div>
@@ -260,6 +422,7 @@ export default function AuctionDetailPage() {
                   auctionAddress={auction.address}
                   startBlock={auction.startBlock}
                   currentBlock={currentBlock ?? undefined}
+                  blindPoolAddress={blindPoolAddress ?? undefined}
                 />
               </div>
             </div>

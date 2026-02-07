@@ -3,9 +3,9 @@
 import { useEffect, useState, useCallback, useRef } from "react"
 import Link from "next/link"
 import { usePublicClient, useBlockNumber } from "wagmi"
-import { sepolia } from "wagmi/chains"
 import { formatEther, type Address } from "viem"
 import { cn } from "@/lib/utils"
+import { chainId, networkName } from "@/lib/chain-config"
 import {
   CCA_FACTORY,
   FACTORY_DEPLOY_BLOCK,
@@ -43,9 +43,9 @@ function deriveStatus(startBlock: bigint, endBlock: bigint, currentBlock: bigint
 }
 
 export function AuctionList({ filter }: { filter?: AuctionStatus }) {
-  const publicClient = usePublicClient({ chainId: sepolia.id })
+  const publicClient = usePublicClient({ chainId })
   // Block number ONLY for countdown display — not used in any effect deps
-  const { data: currentBlock } = useBlockNumber({ chainId: sepolia.id, watch: true })
+  const { data: currentBlock } = useBlockNumber({ chainId, watch: true })
 
   const [auctions, setAuctions] = useState<OnchainAuction[]>([])
   const [loading, setLoading] = useState(true)
@@ -167,7 +167,7 @@ export function AuctionList({ filter }: { filter?: AuctionStatus }) {
     return (
       <div className="border border-border/40 p-12 text-center">
         <p className="font-mono text-sm text-muted-foreground animate-pulse">
-          Loading auctions from Sepolia...
+          Loading auctions from {networkName}...
         </p>
       </div>
     )
@@ -187,7 +187,7 @@ export function AuctionList({ filter }: { filter?: AuctionStatus }) {
         <p className="font-mono text-sm text-muted-foreground">
           {filter
             ? `No ${statusLabel(filter).toLowerCase()} auctions right now.`
-            : "No auctions found on Sepolia."}
+            : `No auctions found on ${networkName}.`}
         </p>
         {filter && (
           <Link href="/auctions" className="mt-4 inline-block font-mono text-xs uppercase tracking-widest text-accent hover:underline">
@@ -201,7 +201,7 @@ export function AuctionList({ filter }: { filter?: AuctionStatus }) {
   return (
     <>
       <span className="mb-4 block font-mono text-[10px] uppercase tracking-widest text-muted-foreground">
-        {filtered.length} auction{filtered.length !== 1 ? "s" : ""} on Sepolia
+        {filtered.length} auction{filtered.length !== 1 ? "s" : ""} on {networkName}
       </span>
       <ul className="grid gap-4 md:gap-6">
         {filtered.map((auction) => (
@@ -227,7 +227,7 @@ export function AuctionList({ filter }: { filter?: AuctionStatus }) {
                   </div>
                   <p className="mt-2 font-mono text-xs text-muted-foreground break-all">{auction.address}</p>
                   <p className="mt-1 font-mono text-[10px] text-muted-foreground/60">
-                    Token {auction.token.slice(0, 6)}…{auction.token.slice(-4)} · Sepolia
+                    Token {auction.token.slice(0, 6)}…{auction.token.slice(-4)} · {networkName}
                   </p>
                 </div>
                 <div className="flex flex-wrap gap-6 md:gap-10 font-mono text-xs text-muted-foreground">
