@@ -6,6 +6,8 @@ Demo video - https://youtu.be/dnrUvJf2Mg4
 
 Pitch - https://blind-pool.vercel.app/ppt
 
+Contract Scripts Repo - https://github.com/ayushsingh82/BlindPool-scripts
+
 ## What It Is
 
 [Uniswap's Continuous Clearing Auction (CCA)](https://docs.uniswap.org/) is a mechanism for **fair, continuous price discovery** and **liquidity bootstrapping** for a new token — all onchain and permissionless. Bids are automatically integrated over time to determine a market-clearing price and seed liquidity into a Uniswap pool when the auction ends.
