@@ -94,6 +94,12 @@ Open [http://localhost:3000](http://localhost:3000) to view the BlindPool app.
 
 **WalletConnect (optional):** For production wallet connect, set `NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID` in `.env.local` with your [WalletConnect Cloud](https://cloud.walletconnect.com/) project ID. The app runs without it; RainbowKit may show a placeholder until set.
 
+## Scripts & Testing
+
+Scripts for deploying BlindPool, CCA auctions, and testing on Sepolia (Foundry):
+
+- **[BlindPool-scripts](https://github.com/ayushsingh82/BlindPool-scripts)** — Deploy CCA, deploy BlindPool, submit bids, reveal, forward, check status. See the repo README for setup and usage.
+
 ## Learn More
 
 - [Uniswap CCA Documentation](https://docs.uniswap.org/)
